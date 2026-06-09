@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # App code
 COPY backend/ ./backend/
-COPY data/ ./data/
+# data dir created at runtime
 
 WORKDIR /app/backend
 
