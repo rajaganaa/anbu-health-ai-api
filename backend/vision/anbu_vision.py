@@ -163,8 +163,9 @@ Return ONLY JSON:
         )
         raw    = resp.choices[0].message.content.strip()
         result = _parse_json(raw)
-        result["mode"]  = mode
-        result["model"] = "groq-text"
+        result["mode"]     = mode
+        result["model"]    = "groq-text"
+        result["raw_text"] = text[:3000]  # Pass raw text so buddhi can reparse if needed
         logger.info(f"[VISION] PDF analyzed: {result.get('summary','')[:80]}")
         return result
     except Exception as e:
