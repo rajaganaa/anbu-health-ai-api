@@ -8,7 +8,8 @@ import os, re, json, logging, time
 from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
 TAMIL_RE   = re.compile(r'[\u0B80-\u0BFF]')
 
 def detect_language(text: str) -> str:
@@ -22,8 +23,10 @@ class GroqEngine:
         api_key = os.environ.get("GROQ_API_KEY","")
         if not api_key: raise RuntimeError("GROQ_API_KEY not set")
         self.client   = Groq(api_key=api_key)
-        self.model    = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-        self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
+        # self.model    = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        # self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
+        self.model    = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
+        self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama-3.3-70b-versatile")
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
         # Try primary model first, fallback on 429
