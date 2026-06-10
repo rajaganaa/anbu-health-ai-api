@@ -1,7 +1,6 @@
 """
 engine/chitta.py — Chitta: Vector Retrieval (Qdrant Cloud)
-Anbu Health AI — Antahkarana Pipeline v2.0
-Falls back to in-memory if Qdrant unavailable.
+Fix: SentenceTransformer cached at class level — not reloaded every request.
 """
 import os
 import logging
@@ -9,9 +8,22 @@ from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 
+# Module-level model cache — loaded once, reused forever
+_embedding_model = None
+
+def _get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        logger.info("[CHITTA] Loading SentenceTransformer model (one-time)...")
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("[CHITTA] SentenceTransformer ready")
+    return _embedding_model
+
+
 class Chitta:
     def __init__(self):
-        self._client = None
+        self._client       = None
         self._fallback_mode = False
         self._setup()
 
@@ -36,7 +48,7 @@ class Chitta:
             logger.info("[CHITTA] ChromaDB fallback active")
         except Exception as e:
             logger.warning(f"[CHITTA] ChromaDB fallback failed: {e}")
-            self._fallback_mode = None  # no vector DB
+            self._fallback_mode = None
 
     def retrieve(self, question: str, entities: List[str], k: int = 5) -> Dict:
         query = question + " " + " ".join(entities[:3])
@@ -50,8 +62,8 @@ class Chitta:
 
     def _qdrant_retrieve(self, query: str, k: int) -> Dict:
         try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer("all-MiniLM-L6-v2")
+            # Use cached model — NOT reloaded every call
+            model  = _get_embedding_model()
             vector = model.encode(query).tolist()
 
             results = self._client.search(
@@ -60,11 +72,11 @@ class Chitta:
                 limit=k,
             )
 
-            chunks = []
+            chunks  = []
             sources = set()
             for r in results:
                 text = r.payload.get("text", "")
-                src = r.payload.get("source", "")
+                src  = r.payload.get("source", "")
                 chunks.append({"text": text, "score": r.score, "source": src})
                 if src:
                     sources.add(src)
@@ -83,11 +95,11 @@ class Chitta:
 
     def _chroma_retrieve(self, query: str, k: int) -> Dict:
         try:
-            col = self._chroma.get_or_create_collection("anbu_medical")
+            col     = self._chroma.get_or_create_collection("anbu_medical")
             results = col.query(query_texts=[query], n_results=min(k, col.count()))
-            docs = results.get("documents", [[]])[0]
-            metas = results.get("metadatas", [[]])[0]
-            chunks = [{"text": d, "source": m.get("source", ""), "score": 0.8} for d, m in zip(docs, metas)]
+            docs    = results.get("documents", [[]])[0]
+            metas   = results.get("metadatas", [[]])[0]
+            chunks  = [{"text": d, "source": m.get("source", ""), "score": 0.8} for d, m in zip(docs, metas)]
             sources = list({m.get("source", "") for m in metas if m.get("source")})
             return {
                 "context_str":      "\n\n".join(docs),

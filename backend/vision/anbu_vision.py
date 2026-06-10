@@ -1,10 +1,6 @@
 """
-vision/anbu_vision.py — Vision + PDF Analyzer v2.3
-Fixes:
-  - Uses PyMuPDF (fitz) as PRIMARY PDF extractor — most reliable
-  - pdfplumber as secondary
-  - pypdf as last resort
-  - Better error logging to catch failures
+vision/anbu_vision.py — Vision + PDF Analyzer v2.4
+Fix: GITHUB_TOKEN read fresh on every call (not frozen at module load).
 """
 import os, base64, logging, re, json
 from typing import Dict
@@ -12,12 +8,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-GITHUB_TOKEN = (
-    os.environ.get("VISION_GITHUB_TOKEN") or
-    os.environ.get("GITHUB_TOKEN") or ""
-)
 ENDPOINT = "https://models.inference.ai.azure.com"
-MODEL = "gpt-4o"
+MODEL    = "gpt-4o"
 
 PROMPTS = {
     "medicine": """You are a pharmacist AI. Analyze this medicine image and extract:
@@ -64,6 +56,14 @@ Respond ONLY in this exact JSON format:
   "summary": "one sentence overall summary"
 }""",
 }
+
+
+def _get_github_token() -> str:
+    """Read token fresh every call — never frozen at import time."""
+    return (
+        os.environ.get("VISION_GITHUB_TOKEN") or
+        os.environ.get("GITHUB_TOKEN") or ""
+    )
 
 
 def _extract_pdf_text(pdf_path: str) -> str:
@@ -157,11 +157,11 @@ Return ONLY JSON:
             model=model,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": f"Report text:\n{text[:4000]}"},
+                {"role": "user",   "content": f"Report text:\n{text[:4000]}"},
             ],
             max_tokens=1000, temperature=0.0,
         )
-        raw = resp.choices[0].message.content.strip()
+        raw    = resp.choices[0].message.content.strip()
         result = _parse_json(raw)
         result["mode"]  = mode
         result["model"] = "groq-text"
@@ -200,8 +200,10 @@ def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
         return _analyze_pdf_with_groq(text, mode)
 
     # ── Image ─────────────────────────────────────────────────────────────────
-    if not GITHUB_TOKEN:
-        logger.warning("[VISION] GITHUB_TOKEN not set — vision unavailable")
+    # Read token FRESH — not from module-level constant
+    github_token = _get_github_token()
+    if not github_token:
+        logger.warning("[VISION] VISION_GITHUB_TOKEN not set — vision unavailable")
         return _fallback_result(mode, "Vision token not configured")
 
     try:
@@ -210,11 +212,12 @@ def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
 
         media_type = {
             "jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "png": "image/png", "webp": "image/webp",
+            "png": "image/png",  "webp": "image/webp",
         }.get(ext, "image/jpeg")
 
         from openai import OpenAI
-        client = OpenAI(base_url=ENDPOINT, api_key=GITHUB_TOKEN)
+        # Use fresh token every call
+        client = OpenAI(base_url=ENDPOINT, api_key=github_token)
         prompt = PROMPTS.get(mode, PROMPTS["medicine"])
 
         response = client.chat.completions.create(
@@ -231,7 +234,7 @@ def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
             max_tokens=800, temperature=0.0,
         )
 
-        raw = response.choices[0].message.content.strip()
+        raw    = response.choices[0].message.content.strip()
         result = _parse_json(raw)
         result["mode"]  = mode
         result["model"] = "gpt-4o"
