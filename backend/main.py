@@ -201,6 +201,17 @@ async def analyze(
                 question = f"[Medicine: {vision_result['drug_name']}] {question}"
             elif vision_result.get("summary") and mode in ("lab", "scan"):
                 question = f"[Report: {vision_result['summary'][:100]}] {question}"
+
+            # ── Run medical tools (expiry, FDA, interactions) ──────────────
+            if mode == "medicine" and vision_result and not vision_result.get("error"):
+                try:
+                    from tools.medical_tools import run_tools_for_medicine
+                    tool_results = run_tools_for_medicine(vision_result, question)
+                    vision_result["tool_results"] = tool_results
+                    logger.info(f"[{req_id}] Tools: {list(tool_results.keys())}")
+                except Exception as te:
+                    logger.warning(f"[{req_id}] Tools failed: {te}")
+
         except Exception as e:
             logger.warning(f"[{req_id}] Vision failed: {e}")
             vision_result = {"error": str(e)}
