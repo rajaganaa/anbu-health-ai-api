@@ -70,21 +70,23 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - uses: azure/container-apps-deploy-action@v1
-        with:
-          resourceGroup: ${{ secrets.AZURE_RESOURCE_GROUP }}
-          containerAppName: ${{ secrets.AZURE_CONTAINER_APP }}
-          imageToDeploy: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          environmentVariables: |
-            GROQ_API_KEY=secretref:groq-key
-            VISION_GITHUB_TOKEN=secretref:vision-github-token
-            WANDB_API_KEY=secretref:wandb-key
-            QDRANT_URL=secretref:qdrant-url
-            QDRANT_API_KEY=secretref:qdrant-key
-            GROQ_MODEL=llama-3.3-70b-versatile
-            WANDB_PROJECT=anbu-health-ai
-            WANDB_ENTITY=rajaganaa-ai
-            PORT=8000
+      # Deploy image using az CLI — NEVER wipes env vars
+      - name: Update container image
+        run: |
+          az containerapp update \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            --set-env-vars \
+              "GROQ_API_KEY=secretref:groq-key" \
+              "VISION_GITHUB_TOKEN=secretref:vision-github-token" \
+              "WANDB_API_KEY=secretref:wandb-key" \
+              "QDRANT_URL=secretref:qdrant-url" \
+              "QDRANT_API_KEY=secretref:qdrant-key" \
+              "GROQ_MODEL=llama-3.3-70b-versatile" \
+              "WANDB_PROJECT=anbu-health-ai" \
+              "WANDB_ENTITY=rajaganaa-ai" \
+              "PORT=8000"
 
       - name: Health check
         run: |
