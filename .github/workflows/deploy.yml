@@ -70,14 +70,14 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - uses: azure/container-apps-deploy-action@v2
+      - uses: azure/container-apps-deploy-action@v1
         with:
           resourceGroup: ${{ secrets.AZURE_RESOURCE_GROUP }}
           containerAppName: ${{ secrets.AZURE_CONTAINER_APP }}
           imageToDeploy: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           environmentVariables: |
             GROQ_API_KEY=secretref:groq-key
-            GITHUB_TOKEN=secretref:github-token
+            VISION_GITHUB_TOKEN=secretref:vision-github-token
             WANDB_API_KEY=secretref:wandb-key
             QDRANT_URL=secretref:qdrant-url
             QDRANT_API_KEY=secretref:qdrant-key
