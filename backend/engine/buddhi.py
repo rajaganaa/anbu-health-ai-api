@@ -302,22 +302,21 @@ class Buddhi:
             "disclaimer":     parsed.get("disclaimer","⚠️ Doctor confirm பண்ணுங்க."),
         }
         if mode == "medicine":
-        # Include tool results if available
-        tool_results = vision_info.get("tool_results", {})
-        if tool_results.get("expiry"):
-            exp = tool_results["expiry"]
-            lines.append(f"=== EXPIRY CHECK ===")
-            lines.append(f"Status: {exp['status']} — {exp['message']}")
-        if tool_results.get("fda") and tool_results["fda"].get("found"):
-            fda = tool_results["fda"]
-            lines.append(f"=== FDA ADVERSE EVENTS (Top reactions) ===")
-            for r in fda.get("reactions", [])[:5]:
-                lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
-        if tool_results.get("interactions"):
-            lines.append(f"=== DRUG INTERACTIONS ===")
-            for i in tool_results["interactions"]:
-                lines.append(f"  [{i['level']}] {i['drug1']} + {i['drug2']}: {i['effect']}")
-        
+            # Tool results — expiry, FDA, interactions
+            tool_results = (vision_info or {}).get("tool_results", {})
+            if tool_results.get("expiry"):
+                exp = tool_results["expiry"]
+                lines.append(f"=== EXPIRY CHECK ===")
+                lines.append(f"Status: {exp['status']} — {exp['message']}")
+            if tool_results.get("fda") and tool_results["fda"].get("found"):
+                fda = tool_results["fda"]
+                lines.append(f"=== FDA ADVERSE EVENTS (Top reactions) ===")
+                for r in fda.get("reactions", [])[:5]:
+                    lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
+            if tool_results.get("interactions"):
+                lines.append(f"=== DRUG INTERACTIONS ===")
+                for ix in tool_results["interactions"]:
+                    lines.append(f"  [{ix['level']}] {ix['drug1']} + {ix['drug2']}: {ix['effect']}")
             sr.update({
                 "uses":                parsed.get("uses",[]),
                 "side_effects":        parsed.get("side_effects",[]),
