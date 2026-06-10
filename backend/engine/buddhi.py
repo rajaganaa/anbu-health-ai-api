@@ -9,7 +9,7 @@ from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-# GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
 TAMIL_RE   = re.compile(r'[\u0B80-\u0BFF]')
 
 def detect_language(text: str) -> str:
