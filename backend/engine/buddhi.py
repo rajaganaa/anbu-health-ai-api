@@ -9,7 +9,6 @@ from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
 TAMIL_RE   = re.compile(r'[\u0B80-\u0BFF]')
 
 def detect_language(text: str) -> str:
@@ -25,8 +24,6 @@ class GroqEngine:
         self.client   = Groq(api_key=api_key)
         self.model    = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
         self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
-        # self.model    = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
-        # self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama-3.3-70b-versatile")
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
         # Try primary model first, fallback on 429
@@ -305,6 +302,22 @@ class Buddhi:
             "disclaimer":     parsed.get("disclaimer","⚠️ Doctor confirm பண்ணுங்க."),
         }
         if mode == "medicine":
+        # Include tool results if available
+        tool_results = vision_info.get("tool_results", {})
+        if tool_results.get("expiry"):
+            exp = tool_results["expiry"]
+            lines.append(f"=== EXPIRY CHECK ===")
+            lines.append(f"Status: {exp['status']} — {exp['message']}")
+        if tool_results.get("fda") and tool_results["fda"].get("found"):
+            fda = tool_results["fda"]
+            lines.append(f"=== FDA ADVERSE EVENTS (Top reactions) ===")
+            for r in fda.get("reactions", [])[:5]:
+                lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
+        if tool_results.get("interactions"):
+            lines.append(f"=== DRUG INTERACTIONS ===")
+            for i in tool_results["interactions"]:
+                lines.append(f"  [{i['level']}] {i['drug1']} + {i['drug2']}: {i['effect']}")
+        
             sr.update({
                 "uses":                parsed.get("uses",[]),
                 "side_effects":        parsed.get("side_effects",[]),
