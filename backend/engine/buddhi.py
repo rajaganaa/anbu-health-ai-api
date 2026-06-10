@@ -21,16 +21,30 @@ class GroqEngine:
         from groq import Groq
         api_key = os.environ.get("GROQ_API_KEY","")
         if not api_key: raise RuntimeError("GROQ_API_KEY not set")
-        self.client = Groq(api_key=api_key)
-        self.model  = GROQ_MODEL
+        self.client   = Groq(api_key=api_key)
+        self.model    = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role":"system","content":system},{"role":"user","content":user}],
-            max_tokens=max_tokens, temperature=temperature,
-        )
-        return resp.choices[0].message.content.strip()
+        # Try primary model first, fallback on 429
+        for model in [self.model, self.fallback]:
+            try:
+                resp = self.client.chat.completions.create(
+                    model=model,
+                    messages=[{"role":"system","content":system},{"role":"user","content":user}],
+                    max_tokens=max_tokens, temperature=temperature,
+                )
+                if model != self.model:
+                    logger.info(f"[BUDDHI] Used fallback model: {model}")
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "rate_limit" in err.lower():
+                    logger.warning(f"[BUDDHI] Rate limit on {model}, trying fallback...")
+                    if model == self.fallback:
+                        raise  # Both models exhausted
+                    continue
+                raise  # Non-rate-limit error, raise immediately
 
 _engine = None
 def _get_engine():
