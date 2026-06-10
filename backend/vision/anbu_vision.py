@@ -1,21 +1,21 @@
 """
-vision/anbu_vision.py — GPT-4o Vision Analyzer
-Anbu Health AI v2.0
-
-Modes:
-  medicine → extracts drug name, strength, dosage, expiry
-  lab      → extracts test names and values
-  scan     → describes X-ray/MRI/ultrasound findings
+vision/anbu_vision.py — Vision + PDF Analyzer v2.3
+Fixes:
+  - Uses PyMuPDF (fitz) as PRIMARY PDF extractor — most reliable
+  - pdfplumber as secondary
+  - pypdf as last resort
+  - Better error logging to catch failures
 """
-import os
-import base64
-import logging
-import re
-from typing import Dict, Optional
+import os, base64, logging, re, json
+from typing import Dict
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_TOKEN = (
+    os.environ.get("VISION_GITHUB_TOKEN") or
+    os.environ.get("GITHUB_TOKEN") or ""
+)
 ENDPOINT = "https://models.inference.ai.azure.com"
 MODEL = "gpt-4o"
 
@@ -25,11 +25,9 @@ PROMPTS = {
 2. Generic name (scientific name)
 3. Strength (e.g., 500mg, 40mg)
 4. Form (tablet/capsule/syrup/injection)
-5. Manufacturer name
-6. Expiry date (if visible)
-7. Drug category (antibiotic/painkiller/antacid/etc)
+5. Drug category (antibiotic/painkiller/antacid/etc)
 
-Respond ONLY in this exact JSON format:
+Respond ONLY in this exact JSON format (no extra text):
 {
   "brand_name": "...",
   "generic_name": "...",
@@ -37,36 +35,27 @@ Respond ONLY in this exact JSON format:
   "strength": "...",
   "form": "...",
   "manufacturer": "...",
-  "expiry_date": "...",
   "drug_category": "...",
   "summary": "one sentence about this medicine"
 }
 If any field is not visible, use "Not visible".""",
 
-    "lab": """You are a lab technician AI. Analyze this lab report image and extract:
-1. Test names and their values
-2. Reference ranges if visible
-3. Which values are abnormal (high/low)
-4. Overall report summary
+    "lab": """You are a lab technician AI. Analyze this lab report and extract ALL test results.
 
 Respond ONLY in this exact JSON format:
 {
   "tests": [{"name": "...", "value": "...", "unit": "...", "range": "...", "status": "normal/high/low"}],
   "abnormal_count": 0,
-  "summary": "one sentence summary of findings",
+  "summary": "one sentence summary of key findings",
   "overall_status": "normal/attention/urgent"
 }""",
 
-    "scan": """You are a radiologist AI. Analyze this medical scan/X-ray image and describe:
-1. Type of scan (X-ray/CT/MRI/Ultrasound)
-2. Body part visible
-3. Key findings (what you see)
-4. Any abnormalities
-5. Overall impression
+    "scan": """You are a radiologist AI. Analyze this medical scan/X-ray.
+IMPORTANT: If you see metal plates, screws, or rods — explicitly say "post-surgical hardware detected".
 
 Respond ONLY in this exact JSON format:
 {
-  "scan_type": "...",
+  "scan_type": "X-ray/CT/MRI/Ultrasound",
   "body_part": "...",
   "findings": ["finding1", "finding2"],
   "abnormalities": ["abnormality1"],
@@ -76,28 +65,156 @@ Respond ONLY in this exact JSON format:
 }""",
 }
 
+
+def _extract_pdf_text(pdf_path: str) -> str:
+    """Extract text from PDF — tries 3 methods."""
+    text = ""
+
+    # Method 1: PyMuPDF (fitz) — most reliable
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+        if text.strip():
+            logger.info(f"[VISION] PyMuPDF extracted {len(text)} chars")
+            return text
+    except Exception as e:
+        logger.warning(f"[VISION] PyMuPDF failed: {e}")
+
+    # Method 2: pdfplumber
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        if text.strip():
+            logger.info(f"[VISION] pdfplumber extracted {len(text)} chars")
+            return text
+    except Exception as e:
+        logger.warning(f"[VISION] pdfplumber failed: {e}")
+
+    # Method 3: pypdf
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(pdf_path)
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if text.strip():
+            logger.info(f"[VISION] pypdf extracted {len(text)} chars")
+            return text
+    except Exception as e:
+        logger.warning(f"[VISION] pypdf failed: {e}")
+
+    logger.error(f"[VISION] ALL PDF extractors failed for {pdf_path}")
+    return ""
+
+
+def _parse_json(raw: str) -> Dict:
+    clean = re.sub(r'```(?:json)?\s*', '', raw).strip().strip('`').strip()
+    try:
+        return json.loads(clean)
+    except Exception:
+        pass
+    start, end = clean.find('{'), clean.rfind('}')
+    if start != -1 and end > start:
+        try:
+            return json.loads(clean[start:end+1])
+        except Exception:
+            pass
+    return {"raw_response": raw, "parse_error": True}
+
+
+def _analyze_pdf_with_groq(text: str, mode: str) -> Dict:
+    """Use Groq to analyze extracted PDF text."""
+    from groq import Groq
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
+        return {"error": "No API key", "summary": text[:300], "mode": mode}
+
+    client = Groq(api_key=api_key)
+    model  = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    if mode == "lab":
+        system = """Extract ALL lab test results from this text.
+Return ONLY JSON:
+{
+  "tests": [{"name": "TestName", "value": "123", "unit": "mg/dL", "range": "70-100", "status": "normal/high/low"}],
+  "abnormal_count": 0,
+  "summary": "2 sentence summary of key abnormal findings",
+  "overall_status": "normal/attention/urgent"
+}
+Extract every single test value you find. Be thorough."""
+    else:
+        system = f"""Analyze this medical {mode} report text.
+Return ONLY JSON:
+{{
+  "summary": "2 sentence summary of key findings",
+  "findings": ["finding1", "finding2"],
+  "overall_status": "normal/attention/urgent"
+}}"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Report text:\n{text[:4000]}"},
+            ],
+            max_tokens=1000, temperature=0.0,
+        )
+        raw = resp.choices[0].message.content.strip()
+        result = _parse_json(raw)
+        result["mode"]  = mode
+        result["model"] = "groq-text"
+        logger.info(f"[VISION] PDF analyzed: {result.get('summary','')[:80]}")
+        return result
+    except Exception as e:
+        logger.error(f"[VISION] Groq text analysis failed: {e}")
+        return {"error": str(e), "summary": text[:300], "mode": mode}
+
+
+def _fallback_result(mode: str, reason: str = "") -> Dict:
+    base = {"mode": mode, "model": "fallback", "error": reason or "Analysis unavailable"}
+    if mode == "medicine":
+        base.update({"brand_name": "Not detected", "generic_name": "Not detected",
+                     "drug_name": "Unknown", "summary": "Could not read medicine"})
+    elif mode == "lab":
+        base.update({"tests": [], "abnormal_count": 0,
+                     "summary": "Could not extract lab values", "overall_status": "unknown"})
+    else:
+        base.update({"scan_type": "Unknown", "body_part": "Unknown",
+                     "findings": [], "summary": "Could not analyze scan"})
+    return base
+
+
 def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
-    """Analyze image using GPT-4o Vision."""
+    """Main entry point — analyze image or PDF."""
+    ext = Path(image_path).suffix.lower().lstrip('.')
+
+    # ── PDF ───────────────────────────────────────────────────────────────────
+    if ext == "pdf":
+        text = _extract_pdf_text(image_path)
+        if not text.strip():
+            logger.error(f"[VISION] PDF extraction returned empty text: {image_path}")
+            return _fallback_result(mode, "PDF text extraction failed")
+        logger.info(f"[VISION] PDF text length: {len(text)}")
+        return _analyze_pdf_with_groq(text, mode)
+
+    # ── Image ─────────────────────────────────────────────────────────────────
     if not GITHUB_TOKEN:
-        logger.warning("[VISION] GITHUB_TOKEN not set — using fallback")
-        return _fallback_result(mode)
+        logger.warning("[VISION] GITHUB_TOKEN not set — vision unavailable")
+        return _fallback_result(mode, "Vision token not configured")
 
     try:
         with open(image_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
 
-        ext = image_path.split(".")[-1].lower()
         media_type = {
             "jpg": "image/jpeg", "jpeg": "image/jpeg",
             "png": "image/png", "webp": "image/webp",
         }.get(ext, "image/jpeg")
 
         from openai import OpenAI
-        client = OpenAI(
-            base_url=ENDPOINT,
-            api_key=GITHUB_TOKEN,
-        )
-
+        client = OpenAI(base_url=ENDPOINT, api_key=GITHUB_TOKEN)
         prompt = PROMPTS.get(mode, PROMPTS["medicine"])
 
         response = client.chat.completions.create(
@@ -111,75 +228,16 @@ def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
                     }},
                 ],
             }],
-            max_tokens=800,
-            temperature=0.0,
+            max_tokens=800, temperature=0.0,
         )
 
         raw = response.choices[0].message.content.strip()
-        logger.info(f"[VISION] Raw response: {raw[:100]}")
-
         result = _parse_json(raw)
-        result["mode"] = mode
+        result["mode"]  = mode
         result["model"] = "gpt-4o"
+        logger.info(f"[VISION] Image analyzed: {result.get('summary','')[:80]}")
         return result
 
     except Exception as e:
-        logger.error(f"[VISION] Failed: {e}")
-        return {"error": str(e), "mode": mode, "model": "gpt-4o"}
-
-
-def _parse_json(raw: str) -> Dict:
-    """Parse JSON from GPT-4o response."""
-    import json
-    # Remove markdown code blocks
-    clean = re.sub(r'```(?:json)?\n?', '', raw).strip().rstrip('`').strip()
-    try:
-        return json.loads(clean)
-    except Exception:
-        # Try to extract JSON object
-        m = re.search(r'\{.*\}', clean, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                pass
-        return {"raw_response": raw, "parse_error": True}
-
-
-def _fallback_result(mode: str) -> Dict:
-    """Return empty structure when vision unavailable."""
-    if mode == "medicine":
-        return {
-            "brand_name": "Not detected",
-            "generic_name": "Not detected",
-            "drug_name": "Unknown",
-            "strength": "Not visible",
-            "form": "Not visible",
-            "manufacturer": "Not visible",
-            "expiry_date": "Not visible",
-            "drug_category": "Unknown",
-            "summary": "Vision AI unavailable — GITHUB_TOKEN not set",
-            "mode": mode,
-            "model": "fallback",
-        }
-    elif mode == "lab":
-        return {
-            "tests": [],
-            "abnormal_count": 0,
-            "summary": "Vision AI unavailable",
-            "overall_status": "unknown",
-            "mode": mode,
-            "model": "fallback",
-        }
-    else:
-        return {
-            "scan_type": "Unknown",
-            "body_part": "Unknown",
-            "findings": [],
-            "abnormalities": [],
-            "impression": "Vision AI unavailable",
-            "urgency": "low",
-            "summary": "Vision AI unavailable — GITHUB_TOKEN not set",
-            "mode": mode,
-            "model": "fallback",
-        }
+        logger.error(f"[VISION] Image analysis failed: {e}")
+        return _fallback_result(mode, str(e))
