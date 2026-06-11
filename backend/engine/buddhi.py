@@ -27,7 +27,7 @@ class GroqEngine:
         self.models = [
             os.environ.get("GROQ_MODEL")          or "llama-3.3-70b-versatile",
             os.environ.get("GROQ_MODEL_FALLBACK")  or "llama3-8b-8192",
-            os.environ.get("GROQ_MODEL_FALLBACK2") or "gemma2-9b-it",
+            os.environ.get("GROQ_MODEL_FALLBACK2") or "mixtral-8x7b-32768",
         ]
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
@@ -51,10 +51,10 @@ class GroqEngine:
                     if i < len(self.models) - 1:
                         time.sleep(0.5)  # brief pause before next model
                         continue
-                    # All models exhausted — return empty string instead of raising
-                    logger.error(f"[BUDDHI] All models rate-limited. Returning empty.")
-                    return ""
-                elif "model_not_found" in err.lower() or "does not exist" in err.lower():
+                    # All models exhausted — return minimal valid JSON so UI shows something useful
+                    logger.error(f"[BUDDHI] All models rate-limited. Returning degraded response.")
+                    return '{"answer":"Rate limit reached. Please wait 1-2 minutes and try again. / சற்று நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.","summary":"API rate limit reached","confidence":0,"urgency":"low","findings":[],"recommendation":"Please try again in a few minutes","disclaimer":"⚠️ Doctor confirm பண்ணுங்க."}'  
+                elif "model_not_found" in err.lower() or "does not exist" in err.lower() or "decommissioned" in err.lower() or "400" in err:
                     logger.warning(f"[BUDDHI] Model {model} not found, skipping...")
                     continue
                 raise  # Other errors (auth, network) — raise immediately
