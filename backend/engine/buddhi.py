@@ -8,7 +8,7 @@ import os, re, json, logging, time
 from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"  # hardcoded fallback — Azure strips empty env vars
 TAMIL_RE   = re.compile(r'[\u0B80-\u0BFF]')
 
 def detect_language(text: str) -> str:
@@ -23,10 +23,11 @@ class GroqEngine:
         if not api_key: raise RuntimeError("GROQ_API_KEY not set")
         self.client = Groq(api_key=api_key)
         # 3-model fallback chain: 70b (best) → 8b (fast, 500k/day) → gemma2 (backup)
+        # Hardcoded defaults so Azure env var stripping never breaks this
         self.models = [
-            os.environ.get("GROQ_MODEL",          "llama-3.3-70b-versatile"),
-            os.environ.get("GROQ_MODEL_FALLBACK",  "llama3-8b-8192"),
-            os.environ.get("GROQ_MODEL_FALLBACK2", "gemma2-9b-it"),
+            os.environ.get("GROQ_MODEL")          or "llama-3.3-70b-versatile",
+            os.environ.get("GROQ_MODEL_FALLBACK")  or "llama3-8b-8192",
+            os.environ.get("GROQ_MODEL_FALLBACK2") or "gemma2-9b-it",
         ]
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
