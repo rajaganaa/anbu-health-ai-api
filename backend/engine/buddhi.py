@@ -21,30 +21,43 @@ class GroqEngine:
         from groq import Groq
         api_key = os.environ.get("GROQ_API_KEY","")
         if not api_key: raise RuntimeError("GROQ_API_KEY not set")
-        self.client   = Groq(api_key=api_key)
-        self.model    = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-        self.fallback = os.environ.get("GROQ_MODEL_FALLBACK", "llama3-8b-8192")
+        self.client = Groq(api_key=api_key)
+        # 3-model fallback chain: 70b (best) → 8b (fast, 500k/day) → gemma2 (backup)
+        self.models = [
+            os.environ.get("GROQ_MODEL",          "llama-3.3-70b-versatile"),
+            os.environ.get("GROQ_MODEL_FALLBACK",  "llama3-8b-8192"),
+            os.environ.get("GROQ_MODEL_FALLBACK2", "gemma2-9b-it"),
+        ]
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
-        # Try primary model first, fallback on 429
-        for model in [self.model, self.fallback]:
+        import time
+        last_err = None
+        for i, model in enumerate(self.models):
             try:
                 resp = self.client.chat.completions.create(
                     model=model,
                     messages=[{"role":"system","content":system},{"role":"user","content":user}],
                     max_tokens=max_tokens, temperature=temperature,
                 )
-                if model != self.model:
-                    logger.info(f"[BUDDHI] Used fallback model: {model}")
+                if i > 0:
+                    logger.info(f"[BUDDHI] Used fallback model #{i+1}: {model}")
                 return resp.choices[0].message.content.strip()
             except Exception as e:
                 err = str(e)
+                last_err = e
                 if "429" in err or "rate_limit" in err.lower():
-                    logger.warning(f"[BUDDHI] Rate limit on {model}, trying fallback...")
-                    if model == self.fallback:
-                        raise  # Both models exhausted
+                    logger.warning(f"[BUDDHI] Rate limit on {model}, trying next model...")
+                    if i < len(self.models) - 1:
+                        time.sleep(0.5)  # brief pause before next model
+                        continue
+                    # All models exhausted — return empty string instead of raising
+                    logger.error(f"[BUDDHI] All models rate-limited. Returning empty.")
+                    return ""
+                elif "model_not_found" in err.lower() or "does not exist" in err.lower():
+                    logger.warning(f"[BUDDHI] Model {model} not found, skipping...")
                     continue
-                raise  # Non-rate-limit error, raise immediately
+                raise  # Other errors (auth, network) — raise immediately
+        return ""
 
 _engine = None
 def _get_engine():
