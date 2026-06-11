@@ -84,7 +84,7 @@ jobs:
               "QDRANT_URL=secretref:qdrant-url" \
               "QDRANT_API_KEY=secretref:qdrant-key" \
               "GROQ_MODEL=llama-3.3-70b-versatile" \
-              "GROQ_MODEL_FALLBACK=llama3-8b-8192" \
+              "GROQ_MODEL_FALLBACK=llama-3.1-8b-instant" \
               "WANDB_PROJECT=anbu-health-ai" \
               "WANDB_ENTITY=rajaganaa-ai" \
               "PORT=8000"
