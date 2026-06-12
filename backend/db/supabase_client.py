@@ -27,11 +27,18 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_PLACEHOLDER = {"disabled", "placeholder", "changeme", "none", "null"}
+
+
+def _configured(value: str) -> bool:
+    return bool(value) and value.strip().lower() not in _PLACEHOLDER
+
+
 SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 MAX_PROMPTS_PER_DAY = int(os.environ.get("MAX_PROMPTS_PER_DAY", "20"))
 
-ENABLED = bool(SUPABASE_URL and SUPABASE_KEY)
+ENABLED = _configured(SUPABASE_URL) and _configured(SUPABASE_KEY)
 
 _HEADERS = {
     "apikey": SUPABASE_KEY,

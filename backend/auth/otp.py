@@ -22,6 +22,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_PLACEHOLDER = {"disabled", "placeholder", "changeme", "none", "null"}
+
+
+def _configured(value: str) -> bool:
+    return bool(value) and value.strip().lower() not in _PLACEHOLDER
+
+
 MSG91_AUTH_KEY = os.environ.get("MSG91_AUTH_KEY", "")
 MSG91_TEMPLATE_ID = os.environ.get("MSG91_TEMPLATE_ID", "")
 MSG91_SENDER_ID = os.environ.get("MSG91_SENDER_ID") or "ANBUHL"
@@ -34,7 +41,7 @@ MSG91_BASE = "https://control.msg91.com/api/v5/otp"
 # `otp_codes` table is provided for that purpose).
 _otp_store = {}
 
-DEV_MODE = not (MSG91_AUTH_KEY and MSG91_TEMPLATE_ID)
+DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
 
 
 def _gen_otp() -> str:
