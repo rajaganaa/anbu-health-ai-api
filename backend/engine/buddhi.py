@@ -26,8 +26,8 @@ class GroqEngine:
         # Hardcoded defaults so Azure env var stripping never breaks this
         self.models = [
             os.environ.get("GROQ_MODEL")          or "llama-3.3-70b-versatile",
-            os.environ.get("GROQ_MODEL_FALLBACK")  or "llama3-8b-8192",
-            os.environ.get("GROQ_MODEL_FALLBACK2") or "mixtral-8x7b-32768",
+            os.environ.get("GROQ_MODEL_FALLBACK")  or "llama-3.1-8b-instant",
+            os.environ.get("GROQ_MODEL_FALLBACK2") or "llama-3.1-70b-versatile",
         ]
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):

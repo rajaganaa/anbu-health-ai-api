@@ -88,8 +88,8 @@ jobs:
               "MSG91_AUTH_KEY=secretref:msg91-authkey" \
               "MSG91_TEMPLATE_ID=secretref:msg91-template-id" \
               "GROQ_MODEL=llama-3.3-70b-versatile" \
-              "GROQ_MODEL_FALLBACK=llama3-8b-8192" \
-              "GROQ_MODEL_FALLBACK2=mixtral-8x7b-32768" \
+              "GROQ_MODEL_FALLBACK=llama-3.1-8b-instant" \
+              "GROQ_MODEL_FALLBACK2=llama-3.1-70b-versatile" \
               "WANDB_PROJECT=anbu-health-ai" \
               "WANDB_ENTITY=rajaganaa-ai" \
               "WANDB_MODE=online" \
