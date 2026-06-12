@@ -30,27 +30,6 @@ class GroqEngine:
             "mixtral-8x7b-32768",        # fallback 2 — separate pool
         ]
 
-class GeminiEngine:
-    """Fallback engine using Google Gemini — uses GEMINI_API_KEY env var."""
-    def __init__(self):
-        self.api_key = os.environ.get("GEMINI_API_KEY") or ""
-        if not self.api_key:
-            raise RuntimeError("GEMINI_API_KEY not set")
-        self.model = os.environ.get("GEMINI_MODEL") or "gemini-1.5-flash"
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-
-    def chat(self, system, user, max_tokens=1400, temperature=0.1):
-        import urllib.request
-        payload = json.dumps({
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"parts": [{"text": user}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
-        }).encode()
-        req = urllib.request.Request(self.url, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
         import time
         last_err = None
@@ -81,25 +60,12 @@ class GeminiEngine:
                 raise  # Other errors (auth, network) — raise immediately
         return ""
 
-_groq_engine = None
-_gemini_engine = None
+_engine = None
 
 def _get_engine():
-    """Returns Groq engine. Falls back to Gemini if Groq key missing."""
-    global _groq_engine
-    if _groq_engine is None:
-        try:
-            _groq_engine = GroqEngine()
-        except RuntimeError:
-            logger.warning("[BUDDHI] Groq not available, using Gemini")
-            return _get_gemini()
-    return _groq_engine
-
-def _get_gemini():
-    global _gemini_engine
-    if _gemini_engine is None:
-        _gemini_engine = GeminiEngine()
-    return _gemini_engine
+    global _engine
+    if _engine is None: _engine = GroqEngine()
+    return _engine
 
 # ── SYSTEM PROMPTS ─────────────────────────────────────────────────────────────
 
@@ -333,23 +299,9 @@ class Buddhi:
 
         try:
             raw = self.engine.chat(system, user_prompt, max_tokens=1400)
-            # If Groq returned empty (all models rate-limited), try Gemini
-            if not raw and os.environ.get("GEMINI_API_KEY"):
-                logger.warning("[BUDDHI] Groq exhausted, trying Gemini fallback...")
-                raw = _get_gemini().chat(system, user_prompt, max_tokens=1400)
         except Exception as e:
-            err = str(e)
             logger.error(f"[BUDDHI] LLM failed: {e}")
-            # Try Gemini if Groq fails with rate limit
-            if ("429" in err or "rate_limit" in err.lower()) and os.environ.get("GEMINI_API_KEY"):
-                try:
-                    logger.warning("[BUDDHI] Groq rate limited, switching to Gemini...")
-                    raw = _get_gemini().chat(system, user_prompt, max_tokens=1400)
-                except Exception as e2:
-                    logger.error(f"[BUDDHI] Gemini also failed: {e2}")
-                    raw = ""
-            else:
-                raw = ""
+            raw = ""
 
         parsed     = _parse_json(raw, mode)
         answer     = parsed.get("answer") or parsed.get("summary") or "மீண்டும் try பண்ணுங்க."
