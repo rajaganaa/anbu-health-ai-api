@@ -19,7 +19,7 @@ COPY backend/ ./backend/
 WORKDIR /app/backend
 
 # Create init files
-RUN touch engine/__init__.py vision/__init__.py rag/__init__.py tools/__init__.py
+RUN touch engine/__init__.py vision/__init__.py rag/__init__.py tools/__init__.py auth/__init__.py db/__init__.py
 
 EXPOSE 8000
 

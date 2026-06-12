@@ -27,6 +27,10 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from dotenv import load_dotenv
 
+from auth.otp import send_otp, verify_otp, resend_otp
+from auth import otp as otp_module
+from db import supabase_client as db
+
 load_dotenv()
 
 logging.basicConfig(
@@ -55,6 +59,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Prometheus metrics — exposes /metrics for scraping ─────────────────────────
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    from prometheus_client import Counter, Histogram, Gauge
+
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
+    PIPELINE_LATENCY = Histogram(
+        "anbu_pipeline_latency_seconds", "Total Antahkarana pipeline latency",
+        ["mode"], buckets=(.5, 1, 2, 3, 5, 8, 13, 21, 34)
+    )
+    REQUESTS_BY_MODE = Counter(
+        "anbu_requests_total", "Requests handled, by mode", ["mode"]
+    )
+    BUDDHI_FALLBACK = Counter(
+        "anbu_buddhi_model_used_total", "Which Groq model answered", ["model"]
+    )
+    CONFIDENCE_SCORE = Gauge(
+        "anbu_last_confidence_score", "Confidence score (0-100) of last response", ["mode"]
+    )
+    HALLUCINATION_FLAGS = Counter(
+        "anbu_hallucination_flags_total", "Sakshi hallucination flags raised"
+    )
+    _METRICS_ENABLED = True
+    logger.info("[METRICS] Prometheus /metrics endpoint enabled")
+except Exception as e:
+    _METRICS_ENABLED = False
+    logger.warning(f"[METRICS] prometheus_fastapi_instrumentator not available: {e}")
+
 
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/tmp/anbu_uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -90,14 +124,18 @@ def _get_wandb():
         return _wandb_run
     api_key = os.environ.get("WANDB_API_KEY", "")
     if not api_key:
+        logger.info("[W&B] WANDB_API_KEY not set — monitoring disabled")
         return None
     try:
         import wandb
+        os.environ.setdefault("WANDB_MODE", "online")
+        wandb.login(key=api_key, relogin=False, verify=False)
         _wandb_run = wandb.init(
-            project=os.environ.get("WANDB_PROJECT", "anbu-health-ai"),
-            entity=os.environ.get("WANDB_ENTITY", "rajaganaa-ai"),
+            project=os.environ.get("WANDB_PROJECT") or "anbu-health-ai",
+            entity=os.environ.get("WANDB_ENTITY") or "rajaganaa-ai",
             name="anbu-health-ai-production",
             resume="allow",
+            settings=wandb.Settings(start_method="thread", init_timeout=20),
             config={
                 "product":  "Anbu Health AI",
                 "author":   "Rajaganapathy M, SRM University",
@@ -108,6 +146,7 @@ def _get_wandb():
             },
             tags=["production", "healthcare", "tamil", "qdrant", "groq"],
         )
+        logger.info(f"[W&B] Initialized — run: {_wandb_run.url if _wandb_run else 'n/a'}")
         return _wandb_run
     except Exception as e:
         logger.warning(f"[W&B] Init failed: {e}")
@@ -132,6 +171,20 @@ def _log_wandb(req_id, question, mode, buddhi_r, ahamkara_r, sakshi_r, latency):
         })
     except Exception as e:
         logger.debug(f"[W&B] Log skipped: {e}")
+
+def _log_metrics(mode, buddhi_r, ahamkara_r, sakshi_r, latency):
+    """Update Prometheus custom metrics (independent of W&B)."""
+    if not _METRICS_ENABLED:
+        return
+    try:
+        PIPELINE_LATENCY.labels(mode=mode).observe(latency)
+        REQUESTS_BY_MODE.labels(mode=mode).inc()
+        BUDDHI_FALLBACK.labels(model=buddhi_r.get("model", "unknown")).inc()
+        conf = ahamkara_r.get("confidence_score", 0)
+        CONFIDENCE_SCORE.labels(mode=mode).set(conf)
+        HALLUCINATION_FLAGS.inc(len(sakshi_r.get("hallucination_flags", [])))
+    except Exception as e:
+        logger.debug(f"[METRICS] Log skipped: {e}")
 
 # ── Startup ────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
@@ -158,11 +211,58 @@ async def health():
         "pipeline": "Antahkarana — Manas→Chitta→Buddhi→Ahamkara→Sakshi",
         "llm":      os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
         "vectordb": "Qdrant Cloud",
+        "supabase": "enabled" if db.is_enabled() else "disabled (using localStorage fallback)",
+        "otp":      "dev_mode" if otp_module.DEV_MODE else "msg91",
+        "metrics":  "enabled" if _METRICS_ENABLED else "disabled",
     }
 
 @app.get("/")
 async def root():
     return {"message": "Anbu Health AI API — /docs for Swagger, /health for status"}
+
+# ── Phone OTP Authentication (MSG91) ───────────────────────────────────────────
+@app.post("/api/auth/send-otp")
+async def auth_send_otp(phone: str = Form(...)):
+    """Send a 6-digit OTP via SMS to a 10-digit Indian phone number."""
+    result = send_otp(phone)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to send OTP"))
+    return result
+
+@app.post("/api/auth/resend-otp")
+async def auth_resend_otp(phone: str = Form(...)):
+    result = resend_otp(phone)
+    if not result.get("success"):
+        raise HTTPException(status_code=429, detail=result.get("error", "Failed to resend OTP"))
+    return result
+
+@app.post("/api/auth/verify-otp")
+async def auth_verify_otp(phone: str = Form(...), otp: str = Form(...)):
+    """Verify OTP. On success, creates/loads the user row in Supabase (if configured)
+    and returns today's prompt usage."""
+    result = verify_otp(phone, otp)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Verification failed"))
+
+    user = db.get_or_create_user(phone)
+    status_r = db.get_prompt_status(phone)
+    return {
+        "success": True,
+        "phone": phone,
+        "user_id": user.get("id"),
+        "prompts": status_r,
+    }
+
+# ── User status / history (Supabase) ───────────────────────────────────────────
+@app.get("/api/user/status")
+async def user_status(phone: str):
+    """Returns today's prompt usage for this phone — server-side enforced limit."""
+    return db.get_prompt_status(phone)
+
+@app.get("/api/user/history")
+async def user_history(phone: str, limit: int = 50):
+    """Returns persisted chat history for this phone (most recent `limit` messages)."""
+    return {"phone": phone, "messages": db.get_history(phone, limit=limit)}
 
 # ── Main analysis endpoint ─────────────────────────────────────────────────────
 @app.post("/api/analyze")
@@ -170,14 +270,31 @@ async def analyze(
     question: str = Form(...),
     mode: str = Form(default="general"),  # lab | scan | medicine | general
     image: Optional[UploadFile] = File(None),
+    phone: Optional[str] = Form(default=None),
+    chat_id: Optional[str] = Form(default=None),
 ):
     """
     Main endpoint for all analysis modes.
     mode: lab | scan | medicine | general
+    phone (optional): when provided and Supabase is configured, the daily
+    20-prompt limit is enforced server-side and the conversation is persisted.
     """
     req_id = str(uuid.uuid4())[:8]
     t_start = time.time()
-    logger.info(f"[{req_id}] mode={mode} q={question[:60]}")
+    logger.info(f"[{req_id}] mode={mode} phone={phone} q={question[:60]}")
+
+    # ── Server-side daily prompt limit (Supabase) ──────────────────────────────
+    if phone:
+        status_r = db.get_prompt_status(phone)
+        if not status_r["allowed"]:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "daily_limit_reached",
+                    "message": "Today's 20 prompts முடிந்தது. நாளைக்கு வா! (Resets at midnight)",
+                    "prompts": status_r,
+                },
+            )
 
     p = get_pipeline()
 
@@ -246,6 +363,18 @@ async def analyze(
 
     latency = round(time.time() - t_start, 3)
     _log_wandb(req_id, question, mode, buddhi_r, ahamkara_r, sakshi_r, latency)
+    _log_metrics(mode, buddhi_r, ahamkara_r, sakshi_r, latency)
+
+    # ── Server-side prompt count + chat history (Supabase) ─────────────────────
+    prompts_status = None
+    if phone:
+        prompts_status = db.increment_prompt_count(phone)
+        try:
+            db.save_message(phone, "user", question, mode=mode, chat_id=chat_id)
+            db.save_message(phone, "assistant", sakshi_r["final_answer"], mode=mode,
+                             structured=buddhi_r.get("structured_response"), chat_id=chat_id)
+        except Exception as e:
+            logger.warning(f"[{req_id}] History save failed: {e}")
 
     # Cleanup
     if image_path and image_path.exists():
@@ -284,6 +413,7 @@ async def analyze(
         "final_answer": sakshi_r["final_answer"],
         "sources":      chitta_r["sources"],
         "confidence":   ahamkara_r.get("confidence_score", 0),
+        "prompts":      prompts_status,
     })
 
 # ── Legacy endpoint (backward compat) ─────────────────────────────────────────

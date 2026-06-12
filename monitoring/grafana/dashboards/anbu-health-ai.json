@@ -1,0 +1,114 @@
+{
+  "title": "Anbu Health AI — Production Dashboard",
+  "uid": "anbu-health-ai",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Requests / min (by mode)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (mode) (rate(anbu_requests_total[5m]) * 60)",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Pipeline Latency p95 (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, mode) (rate(anbu_pipeline_latency_seconds_bucket[10m])))",
+          "legendFormat": "{{mode}} p95"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Groq Model Usage (fallback rate)",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (model) (anbu_buddhi_model_used_total)",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Last Confidence Score (by mode)",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 75 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "anbu_last_confidence_score",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Hallucination Flags (cumulative)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "anbu_hallucination_flags_total"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "HTTP Request Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[10m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[10m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[10m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "HTTP 5xx error rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx/sec"
+        }
+      ]
+    }
+  ]
+}
