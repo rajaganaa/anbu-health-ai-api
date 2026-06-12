@@ -22,13 +22,34 @@ class GroqEngine:
         api_key = os.environ.get("GROQ_API_KEY","")
         if not api_key: raise RuntimeError("GROQ_API_KEY not set")
         self.client = Groq(api_key=api_key)
-        # 3-model fallback chain: 70b (best) → 8b (fast, 500k/day) → gemma2 (backup)
-        # Hardcoded defaults so Azure env var stripping never breaks this
+        # 3-model fallback chain — hardcoded so Azure env stripping never breaks this
+        # Fully hardcoded — Azure env vars are unreliable (get stripped or keep old values)
         self.models = [
-            os.environ.get("GROQ_MODEL")          or "llama-3.3-70b-versatile",
-            os.environ.get("GROQ_MODEL_FALLBACK")  or "llama3-8b-8192",
-            os.environ.get("GROQ_MODEL_FALLBACK2") or "mixtral-8x7b-32768",
+            "llama-3.3-70b-versatile",   # primary — best quality, 100k/day
+            "llama3-8b-8192",            # fallback 1 — fast, 500k/day separate pool
+            "mixtral-8x7b-32768",        # fallback 2 — separate pool
         ]
+
+class GeminiEngine:
+    """Fallback engine using Google Gemini — uses GEMINI_API_KEY env var."""
+    def __init__(self):
+        self.api_key = os.environ.get("GEMINI_API_KEY") or ""
+        if not self.api_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
+        self.model = os.environ.get("GEMINI_MODEL") or "gemini-1.5-flash"
+        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+
+    def chat(self, system, user, max_tokens=1400, temperature=0.1):
+        import urllib.request
+        payload = json.dumps({
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"parts": [{"text": user}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature}
+        }).encode()
+        req = urllib.request.Request(self.url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
         import time
@@ -60,11 +81,25 @@ class GroqEngine:
                 raise  # Other errors (auth, network) — raise immediately
         return ""
 
-_engine = None
+_groq_engine = None
+_gemini_engine = None
+
 def _get_engine():
-    global _engine
-    if _engine is None: _engine = GroqEngine()
-    return _engine
+    """Returns Groq engine. Falls back to Gemini if Groq key missing."""
+    global _groq_engine
+    if _groq_engine is None:
+        try:
+            _groq_engine = GroqEngine()
+        except RuntimeError:
+            logger.warning("[BUDDHI] Groq not available, using Gemini")
+            return _get_gemini()
+    return _groq_engine
+
+def _get_gemini():
+    global _gemini_engine
+    if _gemini_engine is None:
+        _gemini_engine = GeminiEngine()
+    return _gemini_engine
 
 # ── SYSTEM PROMPTS ─────────────────────────────────────────────────────────────
 
@@ -298,9 +333,23 @@ class Buddhi:
 
         try:
             raw = self.engine.chat(system, user_prompt, max_tokens=1400)
+            # If Groq returned empty (all models rate-limited), try Gemini
+            if not raw and os.environ.get("GEMINI_API_KEY"):
+                logger.warning("[BUDDHI] Groq exhausted, trying Gemini fallback...")
+                raw = _get_gemini().chat(system, user_prompt, max_tokens=1400)
         except Exception as e:
+            err = str(e)
             logger.error(f"[BUDDHI] LLM failed: {e}")
-            raw = ""
+            # Try Gemini if Groq fails with rate limit
+            if ("429" in err or "rate_limit" in err.lower()) and os.environ.get("GEMINI_API_KEY"):
+                try:
+                    logger.warning("[BUDDHI] Groq rate limited, switching to Gemini...")
+                    raw = _get_gemini().chat(system, user_prompt, max_tokens=1400)
+                except Exception as e2:
+                    logger.error(f"[BUDDHI] Gemini also failed: {e2}")
+                    raw = ""
+            else:
+                raw = ""
 
         parsed     = _parse_json(raw, mode)
         answer     = parsed.get("answer") or parsed.get("summary") or "மீண்டும் try பண்ணுங்க."
@@ -316,21 +365,6 @@ class Buddhi:
             "disclaimer":     parsed.get("disclaimer","⚠️ Doctor confirm பண்ணுங்க."),
         }
         if mode == "medicine":
-            # Tool results — expiry, FDA, interactions
-            tool_results = (vision_info or {}).get("tool_results", {})
-            if tool_results.get("expiry"):
-                exp = tool_results["expiry"]
-                lines.append(f"=== EXPIRY CHECK ===")
-                lines.append(f"Status: {exp['status']} — {exp['message']}")
-            if tool_results.get("fda") and tool_results["fda"].get("found"):
-                fda = tool_results["fda"]
-                lines.append(f"=== FDA ADVERSE EVENTS (Top reactions) ===")
-                for r in fda.get("reactions", [])[:5]:
-                    lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
-            if tool_results.get("interactions"):
-                lines.append(f"=== DRUG INTERACTIONS ===")
-                for ix in tool_results["interactions"]:
-                    lines.append(f"  [{ix['level']}] {ix['drug1']} + {ix['drug2']}: {ix['effect']}")
             sr.update({
                 "uses":                parsed.get("uses",[]),
                 "side_effects":        parsed.get("side_effects",[]),
