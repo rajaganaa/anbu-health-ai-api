@@ -222,6 +222,7 @@ async def root():
 
 # ── Phone OTP Authentication (MSG91) ───────────────────────────────────────────
 @app.post("/api/auth/send-otp")
+@app.post("/api/send-otp")
 async def auth_send_otp(phone: str = Form(...)):
     """Send a 6-digit OTP via SMS to a 10-digit Indian phone number."""
     result = send_otp(phone)
@@ -237,6 +238,7 @@ async def auth_resend_otp(phone: str = Form(...)):
     return result
 
 @app.post("/api/auth/verify-otp")
+@app.post("/api/verify-otp")
 async def auth_verify_otp(phone: str = Form(...), otp: str = Form(...)):
     """Verify OTP. On success, creates/loads the user row in Supabase (if configured)
     and returns today's prompt usage."""
