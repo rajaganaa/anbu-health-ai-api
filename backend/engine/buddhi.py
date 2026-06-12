@@ -22,12 +22,12 @@ class GroqEngine:
         api_key = os.environ.get("GROQ_API_KEY","")
         if not api_key: raise RuntimeError("GROQ_API_KEY not set")
         self.client = Groq(api_key=api_key)
-        # 3-model fallback chain — hardcoded so Azure env stripping never breaks this
-        # Fully hardcoded — Azure env vars are unreliable (get stripped or keep old values)
+        # 3-model fallback chain: 70b (best) → 8b (fast, 500k/day) → gemma2 (backup)
+        # Hardcoded defaults so Azure env var stripping never breaks this
         self.models = [
-            "llama-3.3-70b-versatile",   # primary — best quality, 100k/day
-            "llama3-8b-8192",            # fallback 1 — fast, 500k/day separate pool
-            "mixtral-8x7b-32768",        # fallback 2 — separate pool
+            os.environ.get("GROQ_MODEL")          or "llama-3.3-70b-versatile",
+            os.environ.get("GROQ_MODEL_FALLBACK")  or "llama3-8b-8192",
+            os.environ.get("GROQ_MODEL_FALLBACK2") or "mixtral-8x7b-32768",
         ]
 
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
@@ -61,7 +61,6 @@ class GroqEngine:
         return ""
 
 _engine = None
-
 def _get_engine():
     global _engine
     if _engine is None: _engine = GroqEngine()
@@ -317,6 +316,21 @@ class Buddhi:
             "disclaimer":     parsed.get("disclaimer","⚠️ Doctor confirm பண்ணுங்க."),
         }
         if mode == "medicine":
+            # Tool results — expiry, FDA, interactions
+            tool_results = (vision_info or {}).get("tool_results", {})
+            if tool_results.get("expiry"):
+                exp = tool_results["expiry"]
+                lines.append(f"=== EXPIRY CHECK ===")
+                lines.append(f"Status: {exp['status']} — {exp['message']}")
+            if tool_results.get("fda") and tool_results["fda"].get("found"):
+                fda = tool_results["fda"]
+                lines.append(f"=== FDA ADVERSE EVENTS (Top reactions) ===")
+                for r in fda.get("reactions", [])[:5]:
+                    lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
+            if tool_results.get("interactions"):
+                lines.append(f"=== DRUG INTERACTIONS ===")
+                for ix in tool_results["interactions"]:
+                    lines.append(f"  [{ix['level']}] {ix['drug1']} + {ix['drug2']}: {ix['effect']}")
             sr.update({
                 "uses":                parsed.get("uses",[]),
                 "side_effects":        parsed.get("side_effects",[]),
