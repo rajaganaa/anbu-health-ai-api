@@ -164,6 +164,10 @@ async def health():
 async def root():
     return {"message": "Anbu Health AI API — /docs for Swagger, /health for status"}
 
+@app.get("/hi")
+async def hi():
+    return {"message": "hi"}
+
 # ── Main analysis endpoint ─────────────────────────────────────────────────────
 @app.post("/api/analyze")
 async def analyze(
