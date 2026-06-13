@@ -36,7 +36,8 @@ OTP_TTL_SECONDS = int(os.environ.get("OTP_TTL_SECONDS", "300"))
 # In-memory store for dev mode + send cooldown tracking
 _otp_store = {}
 
-DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
+# DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
+DEV_MODE = True  # temporary - force dev mode
 
 
 def _gen_otp() -> str:
