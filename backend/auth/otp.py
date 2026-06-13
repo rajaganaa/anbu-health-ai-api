@@ -29,12 +29,14 @@ def _configured(value: str) -> bool:
 
 
 MSG91_AUTH_KEY = os.environ.get("MSG91_AUTH_KEY", "")
+MSG91_TEMPLATE_ID = os.environ.get("MSG91_TEMPLATE_ID", "")
+MSG91_SENDER_ID = os.environ.get("MSG91_SENDER_ID") or "ANBUHC"
 OTP_TTL_SECONDS = int(os.environ.get("OTP_TTL_SECONDS", "300"))
 
 # In-memory store for dev mode + send cooldown tracking
 _otp_store = {}
 
-DEV_MODE = not _configured(MSG91_AUTH_KEY)
+DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
 
 
 def _gen_otp() -> str:
@@ -65,8 +67,11 @@ def send_otp(phone: str) -> dict:
             MSG91_SEND_URL,
             json={
                 "authkey": MSG91_AUTH_KEY,
+                "template_id": MSG91_TEMPLATE_ID,
                 "mobile": _mobile(phone),
+                "sender": MSG91_SENDER_ID,
                 "otp_length": 6,
+                "otp_expiry": OTP_TTL_SECONDS // 60,
                 "channel": "SMS",
             },
             timeout=15,

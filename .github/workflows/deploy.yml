@@ -93,7 +93,7 @@ jobs:
               "WANDB_PROJECT=anbu-health-ai" \
               "WANDB_ENTITY=rajaganaa-ai" \
               "WANDB_MODE=online" \
-              "MSG91_SENDER_ID=ANBUHL" \
+              "MSG91_SENDER_ID=ANBUHC" \
               "MAX_PROMPTS_PER_DAY=20" \
               "PORT=8000"
 
