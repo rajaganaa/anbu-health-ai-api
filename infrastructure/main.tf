@@ -8,6 +8,8 @@
 #
 # To adopt existing resources instead of recreating them, run the
 # `terraform import` commands in README.md BEFORE `terraform apply`.
+# Azure Redis Cache — Anbu Health AI
+# Add this to infrastructure/main.tf
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "azurerm_resource_group" "main" {
@@ -35,6 +37,30 @@ resource "azurerm_container_app_environment" "main" {
   resource_group_name        = azurerm_resource_group.main.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
 }
+resource "azurerm_redis_cache" "main" {
+  name                = "anbu-health-redis"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  capacity            = 0
+  family              = "C"
+  sku_name            = "Basic"
+  minimum_tls_version = "1.2"
+
+  redis_configuration {
+    maxmemory_policy = "allkeys-lru"
+  }
+
+  tags = {
+    product = "anbu-health-ai"
+    patent  = "202641043947"
+  }
+}
+
+output "redis_url" {
+  value     = "rediss://:${azurerm_redis_cache.main.primary_access_key}@${azurerm_redis_cache.main.hostname}:6380"
+  sensitive = true
+}
+
 
 resource "azurerm_container_app" "anbu_health_ai" {
   name                         = var.container_app_name
@@ -206,3 +232,5 @@ resource "azurerm_container_app" "anbu_health_ai" {
     patent  = "202641043947"
   }
 }
+
+
