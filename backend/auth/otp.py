@@ -36,8 +36,8 @@ OTP_TTL_SECONDS = int(os.environ.get("OTP_TTL_SECONDS", "300"))
 # In-memory store for dev mode + send cooldown tracking
 _otp_store = {}
 
-DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
-# DEV_MODE = True  # temporary - force dev mode
+# DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
+DEV_MODE = True  # temporary - force dev mode
 
 
 def _gen_otp() -> str:
@@ -60,7 +60,7 @@ def send_otp(phone: str) -> dict:
     if DEV_MODE:
         otp = _gen_otp()
         _otp_store[phone] = {"otp": otp, "expires": time.time() + OTP_TTL_SECONDS, "sent_at": time.time()}
-        logger.warning(f"[OTP][DEV MODE] OTP for 91{phone} = {otp} (MSG91 not configured)")
+        logger.warning(f"[OTP][DEV MODE] OTP for +91{phone} = {otp} (MSG91 not configured)")
         return {"success": True, "dev_mode": True, "message": "OTP sent (dev mode — check server logs)"}
 
     try:
