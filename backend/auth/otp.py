@@ -1,43 +1,53 @@
 """
-auth/otp.py — Phone OTP authentication via MSG91
-
-Real SMS OTP for Tamil Nadu village users (phone-only login).
-Falls back to DEV MODE (OTP printed in logs, accepts any 6 digits)
-when MSG91_AUTH_KEY is not configured.
-
-MSG91 API:
-  POST https://api.msg91.com/api/v5/otp
-  POST https://api.msg91.com/api/v5/otp/verify
+auth/otp.py — Phone OTP authentication via MSG91 + Redis
+Redis for production OTP storage (survives restarts, works across pods)
+Falls back to in-memory if Redis not configured (DEV MODE)
 """
 
 import os
 import time
 import random
+import json
 import logging
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER = {"disabled", "placeholder", "changeme", "none", "null"}
+_PLACEHOLDER = {"disabled", "placeholder", "changeme", "none", "null", ""}
 
-MSG91_SEND_URL = "https://api.msg91.com/api/v5/otp"
+MSG91_SEND_URL   = "https://api.msg91.com/api/v5/otp"
 MSG91_VERIFY_URL = "https://api.msg91.com/api/v5/otp/verify"
+
+OTP_TTL_SECONDS  = int(os.environ.get("OTP_TTL_SECONDS", "300"))
+MSG91_AUTH_KEY   = os.environ.get("MSG91_AUTH_KEY", "").strip()
+MSG91_TEMPLATE_ID= os.environ.get("MSG91_TEMPLATE_ID", "").strip()
+MSG91_SENDER_ID  = os.environ.get("MSG91_SENDER_ID", "ANBUHC").strip()
+REDIS_URL        = os.environ.get("REDIS_URL", "").strip()
+
+# ── Redis setup (optional) ────────────────────────────────────────────────────
+_redis = None
+if REDIS_URL and REDIS_URL.lower() not in _PLACEHOLDER:
+    try:
+        import redis
+        _redis = redis.from_url(REDIS_URL, decode_responses=True)
+        _redis.ping()
+        logger.info("[OTP] Redis connected ✅")
+    except Exception as e:
+        logger.warning(f"[OTP] Redis connection failed, using in-memory: {e}")
+        _redis = None
+
+# Fallback in-memory store
+_otp_store = {}
 
 
 def _configured(value: str) -> bool:
     return bool(value) and value.strip().lower() not in _PLACEHOLDER
 
 
-MSG91_AUTH_KEY = os.environ.get("MSG91_AUTH_KEY", "")
-MSG91_TEMPLATE_ID = os.environ.get("MSG91_TEMPLATE_ID", "")
-MSG91_SENDER_ID = os.environ.get("MSG91_SENDER_ID") or "ANBUHC"
-OTP_TTL_SECONDS = int(os.environ.get("OTP_TTL_SECONDS", "300"))
-
-# In-memory store for dev mode + send cooldown tracking
-_otp_store = {}
-
-# DEV_MODE = not (_configured(MSG91_AUTH_KEY) and _configured(MSG91_TEMPLATE_ID))
-DEV_MODE = True  # temporary - force dev mode
+def _is_dev_mode() -> bool:
+    key = os.environ.get("MSG91_AUTH_KEY", "").strip()
+    tid = os.environ.get("MSG91_TEMPLATE_ID", "").strip()
+    return not (_configured(key) and _configured(tid))
 
 
 def _gen_otp() -> str:
@@ -45,32 +55,64 @@ def _gen_otp() -> str:
 
 
 def _mobile(phone: str) -> str:
-    return f"91{phone}"
+    digits = phone.strip().lstrip("+")
+    if digits.startswith("91") and len(digits) == 12:
+        return digits
+    return f"91{digits[-10:]}"
 
+
+# ── Redis or memory store helpers ─────────────────────────────────────────────
+
+def _store_otp(phone: str, otp: str):
+    data = {"otp": otp, "sent_at": time.time(), "expires": time.time() + OTP_TTL_SECONDS}
+    if _redis:
+        _redis.setex(f"otp:{phone}", OTP_TTL_SECONDS + 60, json.dumps(data))
+    else:
+        _otp_store[phone] = data
+
+
+def _get_otp(phone: str) -> dict | None:
+    if _redis:
+        raw = _redis.get(f"otp:{phone}")
+        return json.loads(raw) if raw else None
+    return _otp_store.get(phone)
+
+
+def _delete_otp(phone: str):
+    if _redis:
+        _redis.delete(f"otp:{phone}")
+    else:
+        _otp_store.pop(phone, None)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def send_otp(phone: str) -> dict:
-    """Send OTP to a 10-digit Indian phone number."""
+    phone = phone.strip().lstrip("+")
+    if phone.startswith("91"):
+        phone = phone[2:]
     if len(phone) != 10 or not phone.isdigit():
         return {"success": False, "error": "Invalid phone number — must be 10 digits"}
 
-    record = _otp_store.get(phone)
+    record = _get_otp(phone)
     if record and (record.get("sent_at", 0) + 30) > time.time():
         return {"success": False, "error": "Please wait 30s before resending"}
 
-    if DEV_MODE:
-        otp = _gen_otp()
-        _otp_store[phone] = {"otp": otp, "expires": time.time() + OTP_TTL_SECONDS, "sent_at": time.time()}
-        logger.warning(f"[OTP][DEV MODE] OTP for +91{phone} = {otp} (MSG91 not configured)")
-        return {"success": True, "dev_mode": True, "message": "OTP sent (dev mode — check server logs)"}
+    otp = _gen_otp()
+
+    if _is_dev_mode():
+        _store_otp(phone, otp)
+        logger.warning(f"[OTP][DEV] +91{phone} = {otp} | Redis={'yes' if _redis else 'no'}")
+        return {"success": True, "dev_mode": True, "message": "OTP sent (dev mode)"}
 
     try:
         resp = httpx.post(
             MSG91_SEND_URL,
             json={
-                "authkey": MSG91_AUTH_KEY,
-                "template_id": MSG91_TEMPLATE_ID,
+                "authkey": os.environ.get("MSG91_AUTH_KEY", "").strip(),
+                "template_id": os.environ.get("MSG91_TEMPLATE_ID", "").strip(),
                 "mobile": _mobile(phone),
-                "sender": MSG91_SENDER_ID,
+                "sender": os.environ.get("MSG91_SENDER_ID", "ANBUHC").strip(),
                 "otp_length": 6,
                 "otp_expiry": OTP_TTL_SECONDS // 60,
                 "channel": "SMS",
@@ -78,54 +120,47 @@ def send_otp(phone: str) -> dict:
             timeout=15,
         )
         data = resp.json()
-        logger.info(f"[OTP] MSG91 send +91{phone}: {data}")
+        logger.info(f"[OTP] MSG91 +91{phone}: {data}")
         if resp.status_code == 200 and data.get("type") == "success":
-            _otp_store[phone] = {"sent_at": time.time(), "expires": time.time() + OTP_TTL_SECONDS}
+            _store_otp(phone, otp)
             return {"success": True, "message": "OTP sent via SMS"}
         return {"success": False, "error": data.get("message", "MSG91 send failed")}
     except Exception as e:
-        logger.error(f"[OTP] MSG91 send failed: {e}")
+        logger.error(f"[OTP] MSG91 failed: {e}")
         return {"success": False, "error": "SMS gateway error — try again"}
 
 
 def verify_otp(phone: str, otp: str) -> dict:
-    """Verify OTP for a phone number."""
+    phone = phone.strip().lstrip("+")
+    if phone.startswith("91"):
+        phone = phone[2:]
+
     if len(otp) != 6 or not otp.isdigit():
         return {"success": False, "error": "Enter a 6-digit OTP"}
 
-    if DEV_MODE:
-        record = _otp_store.get(phone)
-        if not record:
-            return {"success": False, "error": "No OTP requested. Send OTP first."}
-        if time.time() > record.get("expires", 0):
-            del _otp_store[phone]
-            return {"success": False, "error": "OTP expired. Request a new one."}
+    record = _get_otp(phone)
+    if not record:
+        return {"success": False, "error": "No OTP requested. Send OTP first."}
+    if time.time() > record.get("expires", 0):
+        _delete_otp(phone)
+        return {"success": False, "error": "OTP expired. Request a new one."}
+
+    if _is_dev_mode():
+        _delete_otp(phone)
         return {"success": True, "dev_mode": True}
 
-    try:
-        resp = httpx.post(
-            MSG91_VERIFY_URL,
-            json={
-                "authkey": MSG91_AUTH_KEY,
-                "mobile": _mobile(phone),
-                "otp": otp,
-            },
-            timeout=15,
-        )
-        data = resp.json()
-        logger.info(f"[OTP] MSG91 verify +91{phone}: {data}")
-        if resp.status_code == 200 and data.get("type") == "success":
-            _otp_store.pop(phone, None)
-            return {"success": True}
-        return {"success": False, "error": data.get("message", "Wrong OTP. Try again.")}
-    except Exception as e:
-        logger.error(f"[OTP] MSG91 verify failed: {e}")
-        return {"success": False, "error": "Verification failed — try again"}
+    if record.get("otp") != otp:
+        return {"success": False, "error": "Wrong OTP. Try again."}
+
+    _delete_otp(phone)
+    return {"success": True}
 
 
 def resend_otp(phone: str) -> dict:
-    """Resend OTP (30s cooldown)."""
-    record = _otp_store.get(phone)
+    phone = phone.strip().lstrip("+")
+    if phone.startswith("91"):
+        phone = phone[2:]
+    record = _get_otp(phone)
     if record and (record.get("sent_at", 0) + 30) > time.time():
         return {"success": False, "error": "Please wait 30s before resending"}
     return send_otp(phone)
