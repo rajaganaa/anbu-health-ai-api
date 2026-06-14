@@ -60,7 +60,7 @@ def send_otp(phone: str) -> dict:
     if DEV_MODE:
         otp = _gen_otp()
         _otp_store[phone] = {"otp": otp, "expires": time.time() + OTP_TTL_SECONDS, "sent_at": time.time()}
-        logger.warning(f"[OTP][DEV MODE] OTP for +91{phone} = {otp} (MSG91 not configured)")
+        logger.warning(f"[OTP][DEV MODE] OTP for 91{phone} = {otp} (MSG91 not configured)")
         return {"success": True, "dev_mode": True, "message": "OTP sent (dev mode — check server logs)"}
 
     try:
