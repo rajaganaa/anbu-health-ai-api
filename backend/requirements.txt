@@ -17,3 +17,5 @@ prometheus-fastapi-instrumentator==7.0.0
 torch==2.4.1+cpu
 torchvision==0.19.1+cpu
 --extra-index-url https://download.pytorch.org/whl/cpu
+firebase-admin>=6.5.0
+redis>=5.0.0
