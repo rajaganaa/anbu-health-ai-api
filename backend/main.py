@@ -212,7 +212,7 @@ async def health():
         "llm":      os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
         "vectordb": "Qdrant Cloud",
         "supabase": "enabled" if db.is_enabled() else "disabled (using localStorage fallback)",
-        "otp":      "dev_mode" if otp_module.DEV_MODE else "msg91",
+        "otp":      "dev_mode" if otp_module._is_dev_mode() else "msg91",
         "metrics":  "enabled" if _METRICS_ENABLED else "disabled",
     }
 
@@ -484,6 +484,50 @@ async def list_sources():
     data_dir = Path(os.environ.get("ANBU_DATA_DIR", "./data/drug_guides"))
     pdfs = list(data_dir.glob("*.pdf")) if data_dir.exists() else []
     return {"sources": [p.name for p in pdfs], "count": len(pdfs)}
+
+
+# ── Natural Tamil TTS via Sarvam AI ───────────────────────────────────────────
+@app.post("/api/tts")
+async def text_to_speech(request: Request):
+    """Convert text to natural Tamil speech using Sarvam AI."""
+    import httpx
+    body = await request.json()
+    text = body.get("text", "").strip()[:500]  # limit chars
+    if not text:
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    sarvam_key = os.environ.get("SARVAM_API_KEY", "")
+    if not sarvam_key:
+        raise HTTPException(status_code=503, detail="SARVAM_API_KEY not set")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://api.sarvam.ai/text-to-speech",
+            headers={"api-subscription-key": sarvam_key, "Content-Type": "application/json"},
+            json={
+                "inputs": [text],
+                "target_language_code": "ta-IN",
+                "speaker": "meera",      # natural female Tamil voice
+                "pitch": 0,
+                "pace": 1.0,
+                "loudness": 1.5,
+                "speech_sample_rate": 22050,
+                "enable_preprocessing": True,
+                "model": "bulbul:v1"
+            }
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Sarvam TTS error: {resp.text}")
+
+    data = resp.json()
+    audio_b64 = data.get("audios", [""])[0]
+    if not audio_b64:
+        raise HTTPException(status_code=502, detail="No audio returned")
+
+    from fastapi.responses import Response
+    import base64
+    audio_bytes = base64.b64decode(audio_b64)
+    return Response(content=audio_bytes, media_type="audio/wav")
 
 # ── Entry ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
