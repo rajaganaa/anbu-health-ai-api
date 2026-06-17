@@ -95,7 +95,10 @@ jobs:
               "WANDB_MODE=online" \
               "MSG91_SENDER_ID=ANBUHC" \
               "MAX_PROMPTS_PER_DAY=20" \
-              "PORT=8000"
+              "PORT=8000" \
+              "FIREBASE_SERVICE_ACCOUNT_JSON=secretref:firebase-service-account-json" \
+              "FIREBASE_PROJECT_ID=secretref:react-app-firebase-project-id" \
+              "REDIS_URL=secretref:redis-url"
 
       - name: Open ingress
         run: |
