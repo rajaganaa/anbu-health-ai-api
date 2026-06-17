@@ -50,6 +50,23 @@ def _is_dev_mode() -> bool:
     return not (_configured(key) and _configured(tid))
 
 
+# Public, module-level flag — computed once at import time so other modules
+# (e.g. main.py) can reference `otp_module.DEV_MODE` directly without calling
+# a private function. NOTE: this is evaluated once, at process start. If you
+# need DEV_MODE to reflect env vars changed *after* startup, call
+# _is_dev_mode() directly instead, or call refresh_dev_mode() below.
+DEV_MODE = _is_dev_mode()
+
+
+def refresh_dev_mode() -> bool:
+    """Re-evaluate DEV_MODE from current env vars and update the module-level
+    flag. Useful in tests or if MSG91 credentials are set dynamically after
+    import. Returns the new value."""
+    global DEV_MODE
+    DEV_MODE = _is_dev_mode()
+    return DEV_MODE
+
+
 def _gen_otp() -> str:
     return f"{random.randint(0, 999999):06d}"
 
