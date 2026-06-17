@@ -18,6 +18,9 @@ PROMPTS = {
 3. Strength (e.g., 500mg, 40mg)
 4. Form (tablet/capsule/syrup/injection)
 5. Drug category (antibiotic/painkiller/antacid/etc)
+6. Manufacturing date (Mfg.) printed on the strip/box, if visible
+7. Expiry date (Exp.) printed on the strip/box, if visible
+8. Any dosage/usage instructions actually printed on the packaging (e.g. "1 tablet twice daily", "1-0-1", "BD"), if visible
 
 Respond ONLY in this exact JSON format (no extra text):
 {
@@ -28,21 +31,31 @@ Respond ONLY in this exact JSON format (no extra text):
   "form": "...",
   "manufacturer": "...",
   "drug_category": "...",
+  "mfg_date": "...",
+  "expiry": "...",
+  "dosage_instructions": "...",
   "summary": "one sentence about this medicine"
 }
-If any field is not visible, use "Not visible".""",
+If any field is not visible, use "Not visible". For mfg_date/expiry, copy the EXACT text printed (e.g. "DEC 2025" or "12/2026") — never guess or calculate a date.""",
 
-    "lab": """You are a lab technician AI. Analyze this lab report and extract ALL test results.
+    "lab": """You are a lab technician AI. Analyze this lab report and extract ALL test results, plus any patient/report header details printed on it.
 
 Respond ONLY in this exact JSON format:
 {
   "tests": [{"name": "...", "value": "...", "unit": "...", "range": "...", "status": "normal/high/low"}],
   "abnormal_count": 0,
+  "patient_name": "...",
+  "age": "...",
+  "gender": "...",
+  "report_date": "...",
+  "lab_name": "...",
+  "doctor_name": "...",
   "summary": "one sentence summary of key findings",
   "overall_status": "normal/attention/urgent"
-}""",
+}
+For patient_name, age, gender, report_date, lab_name, doctor_name — copy the EXACT text from the report header/footer. doctor_name is the referring/consulting doctor if printed. If a field is not printed on the report, use "" (empty string) — never guess or invent it.""",
 
-    "scan": """You are a radiologist AI. Analyze this medical scan/X-ray.
+    "scan": """You are a radiologist AI. Analyze this medical scan/X-ray, plus any patient/header details printed on the image or film label.
 IMPORTANT: If you see metal plates, screws, or rods — explicitly say "post-surgical hardware detected".
 
 Respond ONLY in this exact JSON format:
@@ -53,8 +66,15 @@ Respond ONLY in this exact JSON format:
   "abnormalities": ["abnormality1"],
   "impression": "...",
   "urgency": "low/medium/high",
+  "patient_name": "...",
+  "age": "...",
+  "gender": "...",
+  "scan_date": "...",
+  "scan_provider": "...",
+  "doctor_name": "...",
   "summary": "one sentence overall summary"
-}""",
+}
+For patient_name, age, gender, scan_date, scan_provider (hospital/diagnostic centre name), doctor_name (referring/reporting doctor) — copy the EXACT text printed on the scan/label. If a field is not printed, use "" (empty string) — never guess or invent it.""",
 }
 
 
@@ -134,15 +154,47 @@ def _analyze_pdf_with_groq(text: str, mode: str) -> Dict:
     model  = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     if mode == "lab":
-        system = """Extract ALL lab test results from this text.
+        system = """Extract ALL lab test results from this text, plus any patient/report header details present.
 Return ONLY JSON:
 {
   "tests": [{"name": "TestName", "value": "123", "unit": "mg/dL", "range": "70-100", "status": "normal/high/low"}],
   "abnormal_count": 0,
+  "patient_name": "...",
+  "age": "...",
+  "gender": "...",
+  "report_date": "...",
+  "lab_name": "...",
+  "doctor_name": "...",
   "summary": "2 sentence summary of key abnormal findings",
   "overall_status": "normal/attention/urgent"
 }
-Extract every single test value you find. Be thorough."""
+Extract every single test value you find. Be thorough. For patient_name/age/gender/report_date/lab_name/doctor_name use the EXACT text from the report header/footer; if not present use "" — never guess."""
+    elif mode == "scan":
+        system = """Analyze this medical scan report text, plus any patient/report header details present.
+Return ONLY JSON:
+{
+  "summary": "2 sentence summary of key findings",
+  "findings": ["finding1", "finding2"],
+  "overall_status": "normal/attention/urgent",
+  "patient_name": "...",
+  "age": "...",
+  "scan_date": "...",
+  "scan_provider": "...",
+  "doctor_name": "..."
+}
+Use the EXACT text from the report header for patient_name/age/scan_date/scan_provider/doctor_name; if not present use "" — never guess."""
+    elif mode == "medicine":
+        system = """Analyze this medicine-related document text (e.g. pharmacy invoice, package insert).
+Return ONLY JSON:
+{
+  "summary": "2 sentence summary of key findings",
+  "findings": ["finding1", "finding2"],
+  "overall_status": "normal/attention/urgent",
+  "mfg_date": "...",
+  "expiry": "...",
+  "dosage_instructions": "..."
+}
+Use the EXACT text printed for mfg_date/expiry/dosage_instructions; if not present use "" — never guess or calculate a date."""
     else:
         system = f"""Analyze this medical {mode} report text.
 Return ONLY JSON:
