@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -246,6 +246,42 @@ async def auth_verify_otp(phone: str = Form(...), otp: str = Form(...)):
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "Verification failed"))
 
+    user = db.get_or_create_user(phone)
+    status_r = db.get_prompt_status(phone)
+    return {
+        "success": True,
+        "phone": phone,
+        "user_id": user.get("id"),
+        "prompts": status_r,
+    }
+
+# ── Firebase Phone Auth session ────────────────────────────────────────────────
+@app.post("/api/auth/firebase-session")
+async def firebase_session(request: Request):
+    """
+    Called by the frontend after Firebase Phone Auth succeeds in the browser.
+    Verifies the Firebase ID token server-side, creates/loads the Supabase user,
+    and returns today's prompt usage — same shape as verify-otp.
+    """
+    from auth.firebase_auth import verify_id_token, bearer_token, enabled
+
+    token = bearer_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+    if not enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase Admin SDK not configured (set FIREBASE_SERVICE_ACCOUNT_JSON)"
+        )
+
+    try:
+        info = verify_id_token(token)
+    except Exception as e:
+        logger.warning("[FIREBASE] Token verification failed: %s", e)
+        raise HTTPException(status_code=401, detail=f"Invalid Firebase token: {e}")
+
+    phone = info["phone"].lstrip("+")   # strip leading + e.g. 919176631419
     user = db.get_or_create_user(phone)
     status_r = db.get_prompt_status(phone)
     return {
