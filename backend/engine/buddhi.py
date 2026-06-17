@@ -88,6 +88,9 @@ RULES:
 - Clearly mark abnormal values first
 - Do NOT prescribe medicines
 - Recommend doctor for abnormal values
+- If patient_name/age/report_date/lab_name/doctor_name were provided in the data, copy them through EXACTLY as given — never invent or guess them. If not provided, leave as "".
+- summary must be SPECIFIC: mention the actual abnormal test name(s) and value(s), not a generic line like "your report shows some issues". A summary with no real numbers/test names is a FAILURE.
+- key_points must give 3-5 short, concrete, plain-language points that each explain ONE real finding from this report — what it is, whether it's high/low/normal, and why it matters for the patient. No vague filler like "consult your doctor" without context — context comes first, the doctor advice is separate.
 
 {_LANGUAGE_RULES}
 
@@ -96,7 +99,13 @@ Return ONLY valid JSON (no text before/after):
   "mode": "lab",
   "urgency": "low|medium|high",
   "confidence": 85,
-  "summary": "2 sentence simple Tamil overview of key findings",
+  "patient_name": "from data or empty",
+  "age": "from data or empty",
+  "report_date": "from data or empty",
+  "lab_name": "from data or empty",
+  "doctor_name": "from data or empty",
+  "summary": "2 sentence simple Tamil overview naming the actual abnormal test(s) and value(s)",
+  "key_points": ["specific point 1 referencing a real value/finding", "specific point 2", "specific point 3"],
   "findings": ["TestName: value unit (HIGH/LOW/NORMAL — explain briefly)"],
   "abnormal_findings": ["only abnormal tests with values"],
   "normal_findings": ["only normal tests"],
@@ -113,6 +122,9 @@ CRITICAL RULES:
 - NEVER prescribe medicines from X-rays
 - NEVER invent dosage
 - If uncertain → say "Doctor review தேவை"
+- If patient_name/age/scan_date/scan_provider/doctor_name were provided in the data, copy them through EXACTLY as given — never invent or guess them. If not provided, leave as "".
+- summary must be SPECIFIC: name the actual body part and the actual finding(s), not a generic line like "scan looks fine". A summary with no real findings is a FAILURE.
+- key_points must give 3-5 short, concrete, plain-language points that each explain ONE real finding from this scan — what it is and why it matters. No vague filler.
 
 {_LANGUAGE_RULES}
 
@@ -123,7 +135,13 @@ Return ONLY valid JSON:
   "confidence": 70,
   "body_part": "identified body part",
   "scan_type": "X-ray|CT|MRI|Ultrasound",
-  "summary": "Simple Tamil summary of what scan shows",
+  "patient_name": "from data or empty",
+  "age": "from data or empty",
+  "scan_date": "from data or empty",
+  "scan_provider": "from data or empty",
+  "doctor_name": "from data or empty",
+  "summary": "Simple Tamil summary naming the actual body part and finding(s)",
+  "key_points": ["specific point 1 referencing a real finding", "specific point 2", "specific point 3"],
   "findings": ["clear finding 1", "clear finding 2"],
   "implants_detected": false,
   "implant_details": "describe hardware or null",
@@ -138,8 +156,11 @@ You will receive medicine identification data.
 
 RULES:
 - Give REAL medicine information — uses, side effects, warnings
-- NEVER invent dosage numbers
-- Always say doctor prescription required for dosage
+- NEVER invent dosage numbers or expiry/mfg dates — only pass through what was actually extracted from the packaging
+- If dosage_instructions/exp_date/mfg_date were provided in the data, copy them through EXACTLY as given. If not provided, leave as "".
+- Always say doctor prescription required for the exact frequency/quantity to take
+- summary must be SPECIFIC: name the actual drug and its actual category/use, not a generic line like "this is a tablet". A summary with no real drug info is a FAILURE.
+- key_points must give 3-5 short, concrete, plain-language points — what the drug is for, one key warning, one storage/expiry note, etc. No vague filler.
 
 {_LANGUAGE_RULES}
 
@@ -151,11 +172,14 @@ Return ONLY valid JSON:
   "medicine_identified": true,
   "drug_name": "medicine name",
   "drug_category": "antacid/antibiotic/painkiller/etc",
-  "summary": "Simple Tamil — what this medicine is",
+  "exp_date": "from data or empty",
+  "mfg_date": "from data or empty",
+  "dosage": "dosage_instructions from data if present, else null",
+  "summary": "Simple Tamil — what this medicine is, naming the actual drug",
+  "key_points": ["specific point 1", "specific point 2", "specific point 3"],
   "uses": ["specific use 1", "specific use 2", "specific use 3"],
   "side_effects": ["effect 1", "effect 2", "effect 3"],
   "warnings": ["warning 1", "warning 2"],
-  "dosage": null,
   "recommendation": "Doctor prescription follow பண்ணுங்க",
   "disclaimer": "⚠️ இது educational மட்டும். Doctor கிட்ட போங்க.",
   "answer": "3-4 sentence explanation about this medicine in natural spoken Tamil"
@@ -172,6 +196,7 @@ Return ONLY valid JSON:
   "urgency": "low|medium|high",
   "confidence": 80,
   "summary": "Direct answer",
+  "key_points": ["specific point 1", "specific point 2", "specific point 3"],
   "details": ["specific point 1", "specific point 2", "specific point 3"],
   "recommendation": "What patient should do",
   "disclaimer": "⚠️ இது educational மட்டும். Doctor கிட்ட போங்க.",
@@ -203,6 +228,7 @@ def _extract_regex(raw: str, mode: str) -> Dict:
     return {
         "mode":mode,"urgency":g("urgency") or "low","confidence":65,
         "summary":g("summary") or ans,"findings":gl("findings"),"details":gl("details"),
+        "key_points":gl("key_points"),
         "uses":gl("uses"),"side_effects":gl("side_effects"),"warnings":gl("warnings"),
         "recommendation":g("recommendation") or "Doctor கிட்ட போங்க.",
         "disclaimer":g("disclaimer") or "⚠️ Doctor confirm பண்ணுங்க.",
@@ -210,13 +236,17 @@ def _extract_regex(raw: str, mode: str) -> Dict:
         "body_part":g("body_part"),"scan_type":g("scan_type"),
         "drug_name":g("drug_name"),"dosage":None,"medicine_identified":True,
         "abnormal_findings":gl("abnormal_findings"),"normal_findings":gl("normal_findings"),
+        "patient_name":g("patient_name"),"age":g("age"),"report_date":g("report_date"),
+        "lab_name":g("lab_name"),"doctor_name":g("doctor_name"),
+        "scan_date":g("scan_date"),"scan_provider":g("scan_provider"),
+        "exp_date":g("exp_date"),"mfg_date":g("mfg_date"),
     }
 
 def _fallback(mode: str) -> Dict:
     return {
         "mode":mode,"urgency":"low","confidence":0,
         "summary":"Analysis மீண்டும் try பண்ணுங்க.",
-        "findings":[],"details":[],"uses":[],"side_effects":[],"warnings":[],
+        "findings":[],"details":[],"key_points":[],"uses":[],"side_effects":[],"warnings":[],
         "abnormal_findings":[],"normal_findings":[],
         "recommendation":"Doctor கிட்ட போங்க.",
         "disclaimer":"⚠️ Doctor confirm பண்ணுங்க.",
@@ -245,6 +275,14 @@ def _build_vision_context(vision_info: Dict, mode: str) -> str:
                     lines.append(f"  {name}: {value} {unit} | Ref: {ref} | Status: {status}")
             lines.append(f"Abnormal count: {vision_info.get('abnormal_count',0)}")
             lines.append(f"Overall status: {vision_info.get('overall_status','unknown')}")
+        # Patient / report header — pass through verbatim, LLM should copy not invent
+        header = [(k, vision_info.get(k,"")) for k in
+                  ("patient_name","age","gender","report_date","lab_name","doctor_name")]
+        header = [(k,v) for k,v in header if v]
+        if header:
+            lines.append("=== REPORT HEADER (copy these EXACTLY into the matching output fields) ===")
+            for k,v in header:
+                lines.append(f"  {k}: {v}")
         # Always include raw summary/text — handles scrambled Indian lab PDFs
         summary = vision_info.get("summary","")
         raw_text = vision_info.get("raw_text","")
@@ -252,7 +290,7 @@ def _build_vision_context(vision_info: Dict, mode: str) -> str:
         if raw_text and not tests:
             lines.append("=== RAW LAB REPORT TEXT (parse carefully) ===")
             lines.append(raw_text[:3000])
-        lines.append("TASK: Extract ALL test values, compare to reference ranges, explain abnormal values in simple Tanglish.")
+        lines.append("TASK: Extract ALL test values, compare to reference ranges, explain abnormal values in simple Tanglish. Write a SPECIFIC summary (name the actual abnormal test/value) and 3-5 specific key_points — no generic filler.")
 
     elif mode == "scan":
         lines.append("=== SCAN/X-RAY ANALYSIS ===")
@@ -263,16 +301,45 @@ def _build_vision_context(vision_info: Dict, mode: str) -> str:
         if findings: lines.append(f"  Findings: {', '.join(str(f) for f in findings)}")
         abnorm = vision_info.get("abnormalities",[])
         if abnorm: lines.append(f"  Abnormalities: {', '.join(str(a) for a in abnorm)}")
-        lines.append("TASK: Explain what these findings mean for the patient. If hardware visible, mention post-surgical status.")
+        # Patient / scan header — pass through verbatim, LLM should copy not invent
+        header = [(k, vision_info.get(k,"")) for k in
+                  ("patient_name","age","gender","scan_date","scan_provider","doctor_name")]
+        header = [(k,v) for k,v in header if v]
+        if header:
+            lines.append("=== SCAN HEADER (copy these EXACTLY into the matching output fields) ===")
+            for k,v in header:
+                lines.append(f"  {k}: {v}")
+        lines.append("TASK: Explain what these findings mean for the patient. If hardware visible, mention post-surgical status. Write a SPECIFIC summary (name the actual body part/finding) and 3-5 specific key_points — no generic filler.")
 
     elif mode == "medicine":
         lines.append("=== MEDICINE IDENTIFIED ===")
         for k in ("drug_name","brand_name","generic_name","strength","form","drug_category","manufacturer"):
             v = vision_info.get(k,"")
             if v and v not in ("Not visible","Not detected",""): lines.append(f"  {k}: {v}")
+        # Mfg/Exp/dosage printed on packaging — pass through verbatim, LLM should copy not invent
+        for k in ("mfg_date","expiry","dosage_instructions"):
+            v = vision_info.get(k,"")
+            if v and v not in ("Not visible","Not detected",""): lines.append(f"  {k}: {v}")
         s = vision_info.get("summary","")
         if s: lines.append(f"  Summary: {s}")
-        lines.append("TASK: Explain this medicine — uses, side effects, warnings in Tanglish.")
+
+        # Tool results — expiry check, FDA adverse events, drug interactions
+        tool_results = vision_info.get("tool_results", {})
+        if tool_results.get("expiry"):
+            exp = tool_results["expiry"]
+            lines.append("=== EXPIRY CHECK ===")
+            lines.append(f"  Status: {exp.get('status')} — {exp.get('message')}")
+        if tool_results.get("fda") and tool_results["fda"].get("found"):
+            fda = tool_results["fda"]
+            lines.append("=== FDA ADVERSE EVENTS (Top reactions) ===")
+            for r in fda.get("reactions", [])[:5]:
+                lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
+        if tool_results.get("interactions"):
+            lines.append("=== DRUG INTERACTIONS ===")
+            for ix in tool_results["interactions"]:
+                lines.append(f"  [{ix['level']}] {ix['drug1']} + {ix['drug2']}: {ix['effect']}")
+
+        lines.append("TASK: Explain this medicine — uses, side effects, warnings in Tanglish. Write a SPECIFIC summary (name the actual drug) and 3-5 specific key_points — no generic filler.")
 
     if not lines:
         s = vision_info.get("summary","")
@@ -315,38 +382,36 @@ class Buddhi:
         parsed     = _parse_json(raw, mode)
         answer     = parsed.get("answer") or parsed.get("summary") or "மீண்டும் try பண்ணுங்க."
         confidence = int(str(parsed.get("confidence","70")).replace("%","")) if parsed.get("confidence") else 70
+        vi         = vision_info or {}
+
+        def pick(*vals):
+            """First non-empty, non-placeholder value — prefers vision-extracted (OCR) data over the LLM echo."""
+            for v in vals:
+                if v and v not in ("Not visible", "Not detected"):
+                    return v
+            return ""
 
         sr = {
             "summary":        parsed.get("summary",""),
             "full_answer":    answer,
             "findings":       parsed.get("findings") or parsed.get("details") or [],
+            "key_points":     parsed.get("key_points") or [],
             "recommendation": parsed.get("recommendation",""),
             "urgency":        parsed.get("urgency","low"),
             "confidence":     confidence,
             "disclaimer":     parsed.get("disclaimer","⚠️ Doctor confirm பண்ணுங்க."),
         }
         if mode == "medicine":
-            # Tool results — expiry, FDA, interactions
-            tool_results = (vision_info or {}).get("tool_results", {})
-            if tool_results.get("expiry"):
-                exp = tool_results["expiry"]
-                lines.append(f"=== EXPIRY CHECK ===")
-                lines.append(f"Status: {exp['status']} — {exp['message']}")
-            if tool_results.get("fda") and tool_results["fda"].get("found"):
-                fda = tool_results["fda"]
-                lines.append(f"=== FDA ADVERSE EVENTS (Top reactions) ===")
-                for r in fda.get("reactions", [])[:5]:
-                    lines.append(f"  - {r['reaction']}: {r['reports']:,} reports")
-            if tool_results.get("interactions"):
-                lines.append(f"=== DRUG INTERACTIONS ===")
-                for ix in tool_results["interactions"]:
-                    lines.append(f"  [{ix['level']}] {ix['drug1']} + {ix['drug2']}: {ix['effect']}")
+            tool_results = vi.get("tool_results", {})
             sr.update({
                 "uses":                parsed.get("uses",[]),
                 "side_effects":        parsed.get("side_effects",[]),
                 "warnings":            parsed.get("warnings",[]),
-                "dosage":              parsed.get("dosage") or "Doctor prescription follow பண்ணுங்க",
+                "dosage":              pick(vi.get("dosage_instructions"), parsed.get("dosage")) or "Doctor prescription follow பண்ணுங்க",
                 "medicine_identified": parsed.get("medicine_identified", True),
+                "exp_date":            pick(vi.get("expiry"), parsed.get("exp_date")),
+                "mfg_date":            pick(vi.get("mfg_date"), parsed.get("mfg_date")),
+                "expiry_status":       tool_results.get("expiry") or {},
             })
         elif mode == "scan":
             sr.update({
@@ -355,11 +420,21 @@ class Buddhi:
                 "implants_detected": parsed.get("implants_detected", False),
                 "implant_details":   parsed.get("implant_details",""),
                 "fractures_visible": parsed.get("fractures_visible", False),
+                "patient_name":      pick(vi.get("patient_name"), parsed.get("patient_name")),
+                "age":               pick(vi.get("age"), parsed.get("age")),
+                "scan_date":         pick(vi.get("scan_date"), parsed.get("scan_date")),
+                "scan_provider":     pick(vi.get("scan_provider"), parsed.get("scan_provider")),
+                "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
             })
         elif mode == "lab":
             sr.update({
                 "abnormal_findings": parsed.get("abnormal_findings",[]),
                 "normal_findings":   parsed.get("normal_findings",[]),
+                "patient_name":      pick(vi.get("patient_name"), parsed.get("patient_name")),
+                "age":               pick(vi.get("age"), parsed.get("age")),
+                "report_date":       pick(vi.get("report_date"), parsed.get("report_date")),
+                "lab_name":          pick(vi.get("lab_name"), parsed.get("lab_name")),
+                "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
             })
 
         return {
