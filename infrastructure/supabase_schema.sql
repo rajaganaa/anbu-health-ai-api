@@ -50,3 +50,43 @@ alter table users enable row level security;
 alter table prompt_usage enable row level security;
 alter table chat_history enable row level security;
 alter table otp_codes enable row level security;
+
+-- =============================================================================
+-- ATOMIC prompt counter (fixes race condition)
+--
+-- Old approach in Python was: SELECT count -> count+1 in app code -> UPSERT.
+-- Under concurrent requests from the same phone (e.g. double-tap, retry,
+-- multiple devices), two requests can both read count=19, both decide
+-- "allowed", and both write count=20 — but TWO prompts went through past
+-- the limit. This function does the read+check+increment as ONE atomic
+-- database operation, so Postgres serializes concurrent calls correctly.
+--
+-- Call from Python via Supabase RPC:
+--   POST {SUPABASE_URL}/rest/v1/rpc/increment_prompt_atomic
+--   body: {"p_phone": "...", "p_max_per_day": 20}
+-- =============================================================================
+create or replace function increment_prompt_atomic(
+  p_phone text,
+  p_max_per_day int default 20
+) returns table (
+  count int,
+  remaining int,
+  "limit" int,
+  allowed boolean
+) language plpgsql as $$
+declare
+  new_count int;
+begin
+  insert into prompt_usage (phone, usage_date, count)
+  values (p_phone, current_date, 1)
+  on conflict (phone, usage_date)
+  do update set count = prompt_usage.count + 1
+  returning prompt_usage.count into new_count;
+
+  return query select
+    new_count,
+    greatest(0, p_max_per_day - new_count),
+    p_max_per_day,
+    (new_count <= p_max_per_day);
+end;
+$$;

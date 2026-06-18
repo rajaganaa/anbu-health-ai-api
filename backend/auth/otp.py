@@ -19,6 +19,7 @@ MSG91_SEND_URL   = "https://api.msg91.com/api/v5/otp"
 MSG91_VERIFY_URL = "https://api.msg91.com/api/v5/otp/verify"
 
 OTP_TTL_SECONDS  = int(os.environ.get("OTP_TTL_SECONDS", "300"))
+MAX_OTP_ATTEMPTS = int(os.environ.get("MAX_OTP_ATTEMPTS", "5"))
 MSG91_AUTH_KEY   = os.environ.get("MSG91_AUTH_KEY", "").strip()
 MSG91_TEMPLATE_ID= os.environ.get("MSG91_TEMPLATE_ID", "").strip()
 MSG91_SENDER_ID  = os.environ.get("MSG91_SENDER_ID", "ANBUHC").strip()
@@ -81,7 +82,7 @@ def _mobile(phone: str) -> str:
 # ── Redis or memory store helpers ─────────────────────────────────────────────
 
 def _store_otp(phone: str, otp: str):
-    data = {"otp": otp, "sent_at": time.time(), "expires": time.time() + OTP_TTL_SECONDS}
+    data = {"otp": otp, "sent_at": time.time(), "expires": time.time() + OTP_TTL_SECONDS, "attempts": 0}
     if _redis:
         _redis.setex(f"otp:{phone}", OTP_TTL_SECONDS + 60, json.dumps(data))
     else:
@@ -100,6 +101,16 @@ def _delete_otp(phone: str):
         _redis.delete(f"otp:{phone}")
     else:
         _otp_store.pop(phone, None)
+
+
+def _record_failed_attempt(phone: str, record: dict):
+    """Persist incremented attempt count back to the store (Redis or memory)."""
+    record["attempts"] = record.get("attempts", 0) + 1
+    ttl_remaining = max(1, int(record.get("expires", time.time()) - time.time()))
+    if _redis:
+        _redis.setex(f"otp:{phone}", ttl_remaining + 60, json.dumps(record))
+    else:
+        _otp_store[phone] = record
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -162,12 +173,23 @@ def verify_otp(phone: str, otp: str) -> dict:
         _delete_otp(phone)
         return {"success": False, "error": "OTP expired. Request a new one."}
 
+    # ── Brute-force protection: lock out after MAX_OTP_ATTEMPTS wrong tries ──
+    if record.get("attempts", 0) >= MAX_OTP_ATTEMPTS:
+        _delete_otp(phone)
+        logger.warning(f"[OTP] +91{phone} locked out after {MAX_OTP_ATTEMPTS} failed attempts")
+        return {"success": False, "error": "Too many wrong attempts. Request a new OTP."}
+
     if _is_dev_mode():
         _delete_otp(phone)
         return {"success": True, "dev_mode": True}
 
     if record.get("otp") != otp:
-        return {"success": False, "error": "Wrong OTP. Try again."}
+        _record_failed_attempt(phone, record)
+        remaining = MAX_OTP_ATTEMPTS - record.get("attempts", 0)
+        if remaining <= 0:
+            _delete_otp(phone)
+            return {"success": False, "error": "Too many wrong attempts. Request a new OTP."}
+        return {"success": False, "error": f"Wrong OTP. {remaining} attempt(s) left."}
 
     _delete_otp(phone)
     return {"success": True}

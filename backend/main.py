@@ -26,6 +26,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 import uvicorn
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from auth.otp import send_otp, verify_otp, resend_otp
 from auth import otp as otp_module
@@ -59,6 +62,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Rate limiting (per-IP) — protects Groq/Vision quotas from abuse ───────────
+# Uses Redis as the storage backend when REDIS_URL is set, so limits are
+# shared correctly across multiple replicas (in-memory would let each
+# replica track its own counter, effectively multiplying the real limit).
+_redis_url_for_limiter = os.environ.get("REDIS_URL", "").strip()
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=_redis_url_for_limiter or "memory://",
+    default_limits=[],  # set per-route below, not globally
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── Prometheus metrics — exposes /metrics for scraping ─────────────────────────
 try:
@@ -187,8 +203,11 @@ def _log_metrics(mode, buddhi_r, ahamkara_r, sakshi_r, latency):
         logger.debug(f"[METRICS] Log skipped: {e}")
 
 # ── Startup ────────────────────────────────────────────────────────────────────
+_startup_complete = False
+
 @app.on_event("startup")
 async def startup_event():
+    global _startup_complete
     logger.info("[STARTUP] Anbu Health AI API starting...")
     try:
         from rag.anbu_rag import build_index_if_needed
@@ -198,7 +217,20 @@ async def startup_event():
         logger.warning(f"[STARTUP] RAG index skipped: {e}")
     _get_wandb()
 
-# ── Health ─────────────────────────────────────────────────────────────────────
+    # Warm the pipeline (loads torch/sentence-transformers/Qdrant client) here,
+    # at startup, instead of lazily on the first /api/analyze call. Previously
+    # the first real user to hit a freshly-scaled replica paid the full cold
+    # cost (several seconds) — now Container Apps' readiness probe (see
+    # infrastructure/main.tf) won't route traffic to this replica until this
+    # is done.
+    try:
+        get_pipeline()
+        logger.info("[STARTUP] Pipeline warmed")
+    except Exception as e:
+        logger.error(f"[STARTUP] Pipeline warm-up failed: {e} — will retry lazily on first request")
+    _startup_complete = True
+
+# ── Health & readiness ──────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {
@@ -216,6 +248,21 @@ async def health():
         "metrics":  "enabled" if _METRICS_ENABLED else "disabled",
     }
 
+@app.get("/ready")
+async def ready():
+    """
+    Readiness probe — distinct from /health (liveness).
+    /health answers "is the process alive" (always 200 once uvicorn is up).
+    /ready answers "has the Antahkarana pipeline finished loading" (torch,
+    sentence-transformers, Qdrant client). Container Apps' readiness probe
+    should point here so traffic isn't routed to a replica that's still
+    warming up — without this, a freshly-scaled replica can receive and
+    fail/slow-walk requests during its first few seconds of life.
+    """
+    if not _startup_complete:
+        return JSONResponse(status_code=503, content={"ready": False, "reason": "pipeline still warming up"})
+    return {"ready": True}
+
 @app.get("/")
 async def root():
     return {"message": "Anbu Health AI API — /docs for Swagger, /health for status"}
@@ -223,7 +270,8 @@ async def root():
 # ── Phone OTP Authentication (MSG91) ───────────────────────────────────────────
 @app.post("/api/auth/send-otp")
 @app.post("/api/send-otp")
-async def auth_send_otp(phone: str = Form(...)):
+@limiter.limit("5/minute")
+async def auth_send_otp(request: Request, phone: str = Form(...)):
     """Send a 6-digit OTP via SMS to a 10-digit Indian phone number."""
     result = send_otp(phone)
     if not result.get("success"):
@@ -239,7 +287,8 @@ async def auth_resend_otp(phone: str = Form(...)):
 
 @app.post("/api/auth/verify-otp")
 @app.post("/api/verify-otp")
-async def auth_verify_otp(phone: str = Form(...), otp: str = Form(...)):
+@limiter.limit("10/minute")
+async def auth_verify_otp(request: Request, phone: str = Form(...), otp: str = Form(...)):
     """Verify OTP. On success, creates/loads the user row in Supabase (if configured)
     and returns today's prompt usage."""
     result = verify_otp(phone, otp)
@@ -304,7 +353,9 @@ async def user_history(phone: str, limit: int = 50):
 
 # ── Main analysis endpoint ─────────────────────────────────────────────────────
 @app.post("/api/analyze")
+@limiter.limit("15/minute")
 async def analyze(
+    request: Request,
     question: str = Form(...),
     mode: str = Form(default="general"),  # lab | scan | medicine | general
     image: Optional[UploadFile] = File(None),
@@ -456,11 +507,24 @@ async def analyze(
 
 # ── Legacy endpoint (backward compat) ─────────────────────────────────────────
 @app.post("/api/reason")
+@limiter.limit("15/minute")
 async def reason(
+    request: Request,
     question: str = Form(...),
     image: Optional[UploadFile] = File(None),
 ):
-    return await analyze(question=question, mode="medicine" if image else "general", image=image)
+    # NOTE: calling analyze() directly in Python bypasses FastAPI's Form()
+    # default resolution — phone/chat_id must be passed explicitly as None,
+    # not left to default, or they'd receive raw FieldInfo objects instead
+    # of None (pre-existing bug, fixed here while touching this code path).
+    return await analyze(
+        request=request,
+        question=question,
+        mode="medicine" if image else "general",
+        image=image,
+        phone=None,
+        chat_id=None,
+    )
 
 # ── Utility endpoints ──────────────────────────────────────────────────────────
 @app.post("/api/drug-interaction")
