@@ -12,16 +12,23 @@ env:
 
 jobs:
   test:
-    name: Syntax Check
+    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: |
+
+      - name: Syntax check
+        run: |
           pip install fastapi pydantic python-dotenv
-          find backend -name "*.py" | xargs python -m py_compile && echo "✅ All Python files OK"
+          find backend -name "*.py" | xargs python -m py_compile && echo "✅ All Python files compile"
+
+      - name: Run smoke tests
+        run: |
+          pip install pytest httpx slowapi python-multipart uvicorn fastapi pydantic python-dotenv
+          cd backend && python -m pytest tests/ -v
 
   build:
     name: Build & Push Docker Image
@@ -70,13 +77,31 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Deploy image using az CLI — NEVER wipes env vars
+      # ── Capture the currently-active revision BEFORE deploying ──────────────
+      # This is what we roll back to if the new revision fails its health
+      # check below. Without this, a bad deploy just sits there broken until
+      # someone notices and manually finds an older working image tag.
+      - name: Record previous revision (for rollback)
+        id: previous
+        run: |
+          PREV_REVISION=$(az containerapp revision list \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --query "[?properties.active].name | [0]" \
+            --output tsv)
+          echo "revision=$PREV_REVISION" >> "$GITHUB_OUTPUT"
+          echo "Previous active revision: $PREV_REVISION"
+
+      # Deploy image using az CLI — NEVER wipes env vars.
+      # Uses the immutable sha-<commit> tag (not floating :latest) so we
+      # always know exactly which image is running and can target a
+      # rollback precisely.
       - name: Update container image
         run: |
           az containerapp update \
             --name ${{ secrets.AZURE_CONTAINER_APP }} \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-            --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
             --set-env-vars \
               "GROQ_API_KEY=secretref:groq-key" \
               "VISION_GITHUB_TOKEN=secretref:vision-github-token" \
@@ -98,7 +123,8 @@ jobs:
               "PORT=8000" \
               "FIREBASE_SERVICE_ACCOUNT_JSON=secretref:firebase-service-account-json" \
               "FIREBASE_PROJECT_ID=secretref:react-app-firebase-project-id" \
-              "REDIS_URL=secretref:redis-url"
+              "REDIS_URL=secretref:redis-url" \
+              "SARVAM_API_KEY=secretref:sarvam-api-key"
 
       - name: Open ingress
         run: |
@@ -106,3 +132,46 @@ jobs:
             --name ${{ secrets.AZURE_CONTAINER_APP }} \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
             --rule-name deny-all 2>/dev/null || true
+
+      # ── Post-deploy health check ─────────────────────────────────────────────
+      # Give the new revision time to actually warm up (pipeline load —
+      # see /ready in main.py) before judging it. Polls /health for up to
+      # ~2 minutes; Container Apps' own readiness probe is also gating
+      # traffic in parallel, so this is a second, independent confirmation
+      # from outside the cluster.
+      - name: Health check new revision
+        id: healthcheck
+        run: |
+          APP_URL=$(az containerapp show \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" --output tsv)
+
+          echo "Checking https://$APP_URL/health ..."
+          for i in $(seq 1 24); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$APP_URL/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: status=$STATUS, retrying in 5s..."
+            sleep 5
+          done
+          echo "❌ Health check failed after 2 minutes"
+          exit 1
+
+      # ── Automatic rollback on failed health check ───────────────────────────
+      - name: Rollback to previous revision on failure
+        if: failure() && steps.previous.outputs.revision != ''
+        run: |
+          echo "⚠️ Deploy failed health check — rolling back to ${{ steps.previous.outputs.revision }}"
+          az containerapp revision activate \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --revision ${{ steps.previous.outputs.revision }}
+          az containerapp ingress traffic set \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --revision-weight ${{ steps.previous.outputs.revision }}=100
+          echo "Rolled back. Previous revision is now serving 100% of traffic."
+          exit 1

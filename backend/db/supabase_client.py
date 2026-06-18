@@ -110,27 +110,42 @@ def get_prompt_status(phone: str) -> dict:
 
 
 def increment_prompt_count(phone: str) -> dict:
-    """Atomically increment today's prompt count. Returns updated status.
-    Uses upsert with on_conflict — relies on a unique (phone, usage_date) index.
+    """Atomically increment today's prompt count via a Postgres RPC function
+    (increment_prompt_atomic — see infrastructure/supabase_schema.sql).
+
+    This replaces the old read-then-write approach (GET count, +1 in Python,
+    then UPSERT), which had a race condition: concurrent requests from the
+    same phone could both read the same count and both get "allowed",
+    letting users exceed MAX_PROMPTS_PER_DAY under load. The RPC does the
+    read+increment+check as a single atomic DB operation.
     """
     if not ENABLED:
         return {"count": 1, "remaining": MAX_PROMPTS_PER_DAY - 1, "limit": MAX_PROMPTS_PER_DAY, "allowed": True}
 
-    today = date.today().isoformat()
-    status = get_prompt_status(phone)
-    new_count = status["count"] + 1
-
     try:
-        httpx.post(
-            _rest("prompt_usage"),
-            headers={**_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"},
-            json={"phone": phone, "usage_date": today, "count": new_count},
-            params={"on_conflict": "phone,usage_date"},
+        r = httpx.post(
+            _rest("rpc/increment_prompt_atomic"),
+            headers=_HEADERS,
+            json={"p_phone": phone, "p_max_per_day": MAX_PROMPTS_PER_DAY},
             timeout=10,
         )
+        rows = r.json()
+        if rows:
+            row = rows[0]
+            return {
+                "count": row["count"],
+                "remaining": row["remaining"],
+                "limit": row["limit"],
+                "allowed": row["allowed"],
+            }
+        logger.warning(f"[SUPABASE] increment_prompt_atomic returned no rows: {r.text}")
     except Exception as e:
-        logger.warning(f"[SUPABASE] increment_prompt_count failed: {e}")
+        logger.warning(f"[SUPABASE] increment_prompt_atomic failed: {e}")
 
+    # Fail-open fallback: if the RPC call itself errors (network/Supabase
+    # outage), don't block the user — fall back to a best-effort local read.
+    status = get_prompt_status(phone)
+    new_count = status["count"] + 1
     return {
         "count": new_count,
         "remaining": max(0, MAX_PROMPTS_PER_DAY - new_count),

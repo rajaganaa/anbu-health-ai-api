@@ -69,14 +69,24 @@ resource "azurerm_container_app" "anbu_health_ai" {
   revision_mode                 = "Single"
 
   template {
-    min_replicas = 0
-    max_replicas = 1
+    min_replicas = var.min_replicas
+    max_replicas = var.max_replicas
+
+    # ── Autoscale on concurrent HTTP requests per replica ───────────────────
+    # Without this rule, Container Apps only ever runs min_replicas..max_replicas
+    # based on its own default (often too slow/blunt for LLM-call-shaped traffic,
+    # where each request holds the connection open for several seconds while
+    # waiting on Groq/Vision). This rule scales out proactively under real load.
+    http_scale_rule {
+      name                = "http-concurrency"
+      concurrent_requests = var.http_concurrent_requests_per_replica
+    }
 
     container {
       name   = "anbu-health-ai-api"
       image  = var.container_image
-      cpu    = 0.5
-      memory = "1Gi"
+      cpu    = var.container_cpu
+      memory = var.container_memory
 
       # ── Plain env vars (hardcoded — never wiped by Terraform/CI) ────────────
       env {
@@ -153,11 +163,38 @@ resource "azurerm_container_app" "anbu_health_ai" {
         name        = "MSG91_TEMPLATE_ID"
         secret_name = "msg91-template-id"
       }
+      env {
+        name        = "REDIS_URL"
+        secret_name = "redis-url"
+      }
+      env {
+        name        = "FIREBASE_SERVICE_ACCOUNT_JSON"
+        secret_name = "firebase-service-account-json"
+      }
+      env {
+        name        = "FIREBASE_PROJECT_ID"
+        secret_name = "react-app-firebase-project-id"
+      }
+      env {
+        name        = "SARVAM_API_KEY"
+        secret_name = "sarvam-api-key"
+      }
 
       liveness_probe {
         transport = "HTTP"
         path      = "/health"
         port      = 8000
+      }
+
+      readiness_probe {
+        transport               = "HTTP"
+        path                    = "/ready"
+        port                    = 8000
+        initial_delay           = 5
+        interval_seconds        = 5
+        timeout                 = 5
+        failure_count_threshold = 10  # allow ~50s for torch/sentence-transformers/Qdrant to load
+        success_count_threshold = 1
       }
     }
   }
@@ -208,6 +245,30 @@ resource "azurerm_container_app" "anbu_health_ai" {
   secret {
     name  = "msg91-template-id"
     value = var.msg91_template_id
+  }
+  # Added: these were live in Azure (via CI's `az containerapp update`, plus
+  # a manual portal edit for sarvam-api-key) but absent here — see note in
+  # variables.tf. Declaring them so `terraform apply` doesn't strip them.
+  secret {
+    name  = "firebase-service-account-json"
+    value = var.firebase_service_account_json
+  }
+  secret {
+    name  = "react-app-firebase-project-id"
+    value = var.firebase_project_id
+  }
+  secret {
+    name  = "sarvam-api-key"
+    value = var.sarvam_api_key
+  }
+  secret {
+    # Wires the Redis cache created above (azurerm_redis_cache.main) into the
+    # app — previously this only existed as a Terraform *output*, never
+    # actually passed to the running container, so a fresh `terraform apply`
+    # would silently leave REDIS_URL unset (OTP falls back to in-memory,
+    # which breaks across multiple replicas/restarts).
+    name  = "redis-url"
+    value = "rediss://:${azurerm_redis_cache.main.primary_access_key}@${azurerm_redis_cache.main.hostname}:6380"
   }
 
   dynamic "registry" {
