@@ -27,7 +27,7 @@ jobs:
 
       - name: Run smoke tests
         run: |
-          pip install pytest httpx slowapi python-multipart
+          pip install pytest httpx slowapi python-multipart uvicorn fastapi pydantic python-dotenv
           cd backend && python -m pytest tests/ -v
 
   build:
