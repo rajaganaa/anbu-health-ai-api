@@ -24,8 +24,8 @@ resource "azurerm_resource_group" "main" {
 }
 
 resource "azurerm_log_analytics_workspace" "main" {
-  name                = "${var.container_app_env_name}-logs"
-  location            = azurerm_resource_group.main.location
+  name                = var.log_analytics_workspace_name
+  location            = var.resources_location
   resource_group_name = azurerm_resource_group.main.name
   sku                 = "PerGB2018"
   retention_in_days   = 30
@@ -33,33 +33,20 @@ resource "azurerm_log_analytics_workspace" "main" {
 
 resource "azurerm_container_app_environment" "main" {
   name                       = var.container_app_env_name
-  location                   = azurerm_resource_group.main.location
+  location                   = var.resources_location
   resource_group_name        = azurerm_resource_group.main.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
-}
-resource "azurerm_redis_cache" "main" {
-  name                = "anbu-health-redis"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-  capacity            = 0
-  family              = "C"
-  sku_name            = "Basic"
-  minimum_tls_version = "1.2"
 
-  redis_configuration {
-    maxmemory_policy = "allkeys-lru"
-  }
-
-  tags = {
-    product = "anbu-health-ai"
-    patent  = "202641043947"
+  lifecycle {
+    ignore_changes = [log_analytics_workspace_id]
   }
 }
 
-output "redis_url" {
-  value     = "rediss://:${azurerm_redis_cache.main.primary_access_key}@${azurerm_redis_cache.main.hostname}:6380"
-  sensitive = true
-}
+
+
+
+
+
 
 
 resource "azurerm_container_app" "anbu_health_ai" {
@@ -190,7 +177,7 @@ resource "azurerm_container_app" "anbu_health_ai" {
         transport               = "HTTP"
         path                    = "/ready"
         port                    = 8000
-        initial_delay           = 5
+
         interval_seconds        = 5
         timeout                 = 5
         failure_count_threshold = 10  # allow ~50s for torch/sentence-transformers/Qdrant to load
@@ -268,7 +255,7 @@ resource "azurerm_container_app" "anbu_health_ai" {
     # would silently leave REDIS_URL unset (OTP falls back to in-memory,
     # which breaks across multiple replicas/restarts).
     name  = "redis-url"
-    value = "rediss://:${azurerm_redis_cache.main.primary_access_key}@${azurerm_redis_cache.main.hostname}:6380"
+    value = var.upstash_redis_url
   }
 
   dynamic "registry" {

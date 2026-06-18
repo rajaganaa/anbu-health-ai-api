@@ -11,7 +11,13 @@ variable "resource_group_name" {
 }
 
 variable "location" {
-  description = "Azure region"
+  description = "Azure region for the resource group itself"
+  type        = string
+  default     = "eastus"
+}
+
+variable "resources_location" {
+  description = "Azure region for resources inside the RG (workspace, environment, app, redis) — different from the RG's own region"
   type        = string
   default     = "centralindia"
 }
@@ -20,6 +26,12 @@ variable "container_app_env_name" {
   description = "Existing Container App Environment name"
   type        = string
   default     = "antahkarana-env"
+}
+
+variable "log_analytics_workspace_name" {
+  description = "Existing Log Analytics workspace name"
+  type        = string
+  default     = "workspace-antahkaranarg05vB"
 }
 
 variable "container_app_name" {
@@ -135,4 +147,10 @@ variable "http_concurrent_requests_per_replica" {
   description = "Target concurrent requests per replica before Container Apps spins up another one. Lower = scales out sooner (safer, costs more); higher = fewer replicas (cheaper, riskier under spiky load)."
   type        = number
   default     = 10
+}
+variable "upstash_redis_url" {
+  description = "Upstash Redis connection string (rediss://default:<password>@<host>:<port>)"
+  type        = string
+  sensitive   = true
+  default     = ""
 }
