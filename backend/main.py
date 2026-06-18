@@ -244,7 +244,8 @@ async def health():
         "llm":      os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
         "vectordb": "Qdrant Cloud",
         "supabase": "enabled" if db.is_enabled() else "disabled (using localStorage fallback)",
-        "otp":      "dev_mode" if otp_module.DEV_MODE else "msg91",
+        # "otp":      "dev_mode" if otp_module.DEV_MODE else "msg91",
+        "otp":      "firebase",  # MSG91/legacy OTP module unused — auth handled by Firebase on frontend
         "metrics":  "enabled" if _METRICS_ENABLED else "disabled",
     }
 
