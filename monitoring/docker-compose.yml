@@ -1,24 +1,25 @@
-# Anbu Health AI — Monitoring stack (Prometheus + Grafana)
-#
-# Run locally or on any free VM (e.g. an Azure/GCP/AWS student-credit VM):
-#   cd monitoring
-#   docker compose up -d
-#
-# Prometheus scrapes the live /metrics endpoint of the deployed API
-# (Azure Container Apps — scale-to-zero is fine, Prometheus just records
-# gaps when the app is asleep). Grafana auto-loads a pre-built dashboard.
-#
-#   Prometheus → http://localhost:9090
-#   Grafana    → http://localhost:3001  (admin / admin — change on first login)
-
 version: "3.8"
 
 services:
+  prometheus-config:
+    image: alpine:3.20
+    container_name: anbu-prometheus-config
+    env_file:
+      - .env
+    volumes:
+      - ./prometheus.template.yml:/template/prometheus.template.yml:ro
+      - prom_config:/out
+    command: >
+      sh -c "apk add --no-cache gettext > /dev/null &&
+             envsubst < /template/prometheus.template.yml > /out/prometheus.yml"
+
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: anbu-prometheus
+    depends_on:
+      - prometheus-config
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_config:/etc/prometheus
       - prom_data:/prometheus
     ports:
       - "9090:9090"
@@ -46,4 +47,5 @@ services:
 
 volumes:
   prom_data:
+  prom_config:
   grafana_data:

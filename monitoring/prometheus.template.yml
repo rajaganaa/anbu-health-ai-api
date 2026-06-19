@@ -12,3 +12,9 @@ scrape_configs:
         labels:
           product: "anbu-health-ai"
           env: "production"
+
+remote_write:
+  - url: "${GRAFANA_REMOTE_WRITE_URL}"
+    basic_auth:
+      username: "${GRAFANA_USERNAME}"
+      password: "${GRAFANA_API_TOKEN}"
