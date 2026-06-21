@@ -166,3 +166,17 @@ variable "upstash_redis_url" {
   sensitive   = true
   default     = ""
 }
+
+variable "gemini_project_id" {
+  description = "Google Cloud project ID for Gemini / Vertex AI access"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "gemini_vision_sa_json" {
+  description = "JSON key for the Google Cloud service account used for Gemini Vision (Vertex AI)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

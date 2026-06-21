@@ -135,6 +135,18 @@ resource "azurerm_container_app" "anbu_health_ai" {
         value = "gemini-1.5-pro"
       }
 
+
+      env {
+        name        = "GEMINI_SERVICE_ACCOUNT_JSON"
+        secret_name = "gemini-vision-sa-json"
+      }
+
+
+      env {
+        name  = "GEMINI_PROJECT_ID"
+        value = var.gemini_project_id
+    }
+
       env {
         name        = "WANDB_API_KEY"
         secret_name = "wandb-key"
@@ -222,11 +234,14 @@ resource "azurerm_container_app" "anbu_health_ai" {
     name  = "vision-github-token"
     value = var.vision_github_token
   }
-secret {
-  name  = "gemini-api-key"
-  value = var.gemini_api_key
-}
-
+  secret {
+    name  = "gemini-api-key"
+    value = var.gemini_api_key
+  }
+  secret {
+  name  = "gemini-vision-sa-json"
+  value = var.gemini_vision_sa_json
+  }
 
   secret {
     name  = "wandb-key"

@@ -313,15 +313,38 @@ def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
 
 
 def _analyze_image_with_gemini(image_path: str, mode: str, ext: str) -> Dict:
-    """Fallback vision path using Gemini (much higher free-tier quota than GitHub Models)."""
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if not gemini_key:
-        logger.warning("[VISION] GEMINI_API_KEY not set — cannot fall back, vision unavailable")
+    """Fallback vision path using Gemini via Vertex AI (much higher quota than GitHub Models).
+
+    Auth: uses a GCP service account JSON (passed via GEMINI_SERVICE_ACCOUNT_JSON
+    env var, written to a temp file at startup) rather than Application Default
+    Credentials — ADC requires running ON a GCP resource (Compute Engine, Cloud
+    Run, GKE) with an attached service account; this app runs on Azure, so
+    there's no GCP metadata server for ADC to talk to. A service account JSON
+    works regardless of which cloud the app is hosted on.
+    """
+    sa_json = os.environ.get("GEMINI_SERVICE_ACCOUNT_JSON", "")
+    project_id = os.environ.get("GEMINI_PROJECT_ID", "")
+    if not sa_json or not project_id:
+        logger.warning("[VISION] GEMINI_SERVICE_ACCOUNT_JSON/GEMINI_PROJECT_ID not set — cannot fall back, vision unavailable")
         return None
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel(os.environ.get("GEMINI_VISION_MODEL", "gemini-1.5-flash"))
+        import json, tempfile
+        from google import genai
+        from google.genai import types
+        from google.oauth2 import service_account
+
+        creds_dict = json.loads(sa_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+
+        client = genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=os.environ.get("GEMINI_LOCATION", "us-central1"),
+            credentials=credentials,
+        )
 
         with open(image_path, "rb") as f:
             image_bytes = f.read()
@@ -331,15 +354,20 @@ def _analyze_image_with_gemini(image_path: str, mode: str, ext: str) -> Dict:
         }.get(ext, "image/jpeg")
 
         prompt = PROMPTS.get(mode, PROMPTS["medicine"])
-        response = model.generate_content([
-            prompt,
-            {"mime_type": media_type, "data": image_bytes},
-        ])
+        model_name = os.environ.get("GEMINI_VISION_MODEL", "gemini-2.5-pro")
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type=media_type),
+                prompt,
+            ],
+        )
         raw = response.text.strip()
         result = _parse_json(raw)
         result["mode"]  = mode
-        result["model"] = "gemini-1.5-flash"
-        logger.info(f"[VISION] Image analyzed via Gemini fallback: {result.get('summary','')[:80]}")
+        result["model"] = model_name
+        logger.info(f"[VISION] Image analyzed via Gemini ({model_name}) fallback: {result.get('summary','')[:80]}")
         return result
     except Exception as e:
         logger.error(f"[VISION] Gemini fallback also failed: {e}")
