@@ -29,6 +29,7 @@ class GroqEngine:
         self.api_keys = [primary_key] + extra_keys
         self._key_index = 0
         self.client = Groq(api_key=self.api_keys[self._key_index])
+        logger.info(f"[BUDDHI] Initialized with {len(self.api_keys)} Groq API key(s) available for rotation")
         # 3-model fallback chain: 70b (best) → 8b (fast, 500k/day) → gemma2 (backup)
         # Hardcoded defaults so Azure env var stripping never breaks this
         self.models = [
