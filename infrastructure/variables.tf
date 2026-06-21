@@ -57,10 +57,22 @@ variable "groq_key" {
   type      = string
   sensitive = true
 }
+variable "groq_keys_extra" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
 variable "vision_github_token" {
   type      = string
   sensitive = true
 }
+variable "gemini_api_key" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+
 variable "wandb_key" {
   type      = string
   sensitive = true
@@ -146,7 +158,7 @@ variable "container_memory" {
 variable "http_concurrent_requests_per_replica" {
   description = "Target concurrent requests per replica before Container Apps spins up another one. Lower = scales out sooner (safer, costs more); higher = fewer replicas (cheaper, riskier under spiky load)."
   type        = number
-  default     = 10
+  default     = 3
 }
 variable "upstash_redis_url" {
   description = "Upstash Redis connection string (rediss://default:<password>@<host>:<port>)"

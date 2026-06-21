@@ -353,7 +353,7 @@ async def user_history(phone: str, limit: int = 50):
 
 # ── Main analysis endpoint ─────────────────────────────────────────────────────
 @app.post("/api/analyze")
-@limiter.limit("100/minute")
+@limiter.limit("15/minute")
 async def analyze(
     request: Request,
     question: str = Form(...),

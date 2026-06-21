@@ -295,5 +295,52 @@ def analyze_image(image_path: str, mode: str = "medicine") -> Dict:
         return result
 
     except Exception as e:
-        logger.error(f"[VISION] Image analysis failed: {e}")
-        return _fallback_result(mode, str(e))
+        err = str(e)
+        logger.warning(f"[VISION] GitHub Models (gpt-4o) failed: {err}")
+        # GitHub Models free tier is capped at 50 requests/day, 10/min — when
+        # exhausted (429) or otherwise unavailable, fall back to Gemini, which
+        # has a far higher free-tier ceiling (1500 req/day) and native vision support.
+        if "429" in err or "rate" in err.lower() or "quota" in err.lower():
+            gemini_result = _analyze_image_with_gemini(image_path, mode, ext)
+            if gemini_result is not None:
+                return gemini_result
+        else:
+            # Non-rate-limit errors (auth, network) still worth trying Gemini once
+            gemini_result = _analyze_image_with_gemini(image_path, mode, ext)
+            if gemini_result is not None:
+                return gemini_result
+        return _fallback_result(mode, err)
+
+
+def _analyze_image_with_gemini(image_path: str, mode: str, ext: str) -> Dict:
+    """Fallback vision path using Gemini (much higher free-tier quota than GitHub Models)."""
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    if not gemini_key:
+        logger.warning("[VISION] GEMINI_API_KEY not set — cannot fall back, vision unavailable")
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel(os.environ.get("GEMINI_VISION_MODEL", "gemini-1.5-flash"))
+
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        media_type = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png",  "webp": "image/webp",
+        }.get(ext, "image/jpeg")
+
+        prompt = PROMPTS.get(mode, PROMPTS["medicine"])
+        response = model.generate_content([
+            prompt,
+            {"mime_type": media_type, "data": image_bytes},
+        ])
+        raw = response.text.strip()
+        result = _parse_json(raw)
+        result["mode"]  = mode
+        result["model"] = "gemini-1.5-flash"
+        logger.info(f"[VISION] Image analyzed via Gemini fallback: {result.get('summary','')[:80]}")
+        return result
+    except Exception as e:
+        logger.error(f"[VISION] Gemini fallback also failed: {e}")
+        return None

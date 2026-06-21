@@ -119,9 +119,22 @@ resource "azurerm_container_app" "anbu_health_ai" {
         secret_name = "groq-key"
       }
       env {
+        name        = "GROQ_API_KEYS_EXTRA"
+        secret_name = "groq-keys-extra"
+      }
+      env {
         name        = "VISION_GITHUB_TOKEN"
         secret_name = "vision-github-token"
       }
+      env {
+        name        = "GEMINI_API_KEY"
+        secret_name = "gemini-api-key"
+      }
+      env {
+        name  = "GEMINI_VISION_MODEL"
+        value = "gemini-1.5-pro"
+      }
+
       env {
         name        = "WANDB_API_KEY"
         secret_name = "wandb-key"
@@ -202,9 +215,19 @@ resource "azurerm_container_app" "anbu_health_ai" {
     value = var.groq_key
   }
   secret {
+    name  = "groq-keys-extra"
+    value = var.groq_keys_extra
+  }
+  secret {
     name  = "vision-github-token"
     value = var.vision_github_token
   }
+secret {
+  name  = "gemini-api-key"
+  value = var.gemini_api_key
+}
+
+
   secret {
     name  = "wandb-key"
     value = var.wandb_key

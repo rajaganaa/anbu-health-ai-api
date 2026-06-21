@@ -19,9 +19,16 @@ def detect_language(text: str) -> str:
 class GroqEngine:
     def __init__(self):
         from groq import Groq
-        api_key = os.environ.get("GROQ_API_KEY","")
-        if not api_key: raise RuntimeError("GROQ_API_KEY not set")
-        self.client = Groq(api_key=api_key)
+        # Support multiple comma-separated keys for rotation when one hits its
+        # rate limit (e.g. several free-tier Groq accounts) — falls back to
+        # single-key behavior if only GROQ_API_KEY is set.
+        primary_key = os.environ.get("GROQ_API_KEY", "")
+        if not primary_key: raise RuntimeError("GROQ_API_KEY not set")
+        extra_keys_raw = os.environ.get("GROQ_API_KEYS_EXTRA", "")
+        extra_keys = [k.strip() for k in extra_keys_raw.split(",") if k.strip()]
+        self.api_keys = [primary_key] + extra_keys
+        self._key_index = 0
+        self.client = Groq(api_key=self.api_keys[self._key_index])
         # 3-model fallback chain: 70b (best) → 8b (fast, 500k/day) → gemma2 (backup)
         # Hardcoded defaults so Azure env var stripping never breaks this
         self.models = [
@@ -30,34 +37,49 @@ class GroqEngine:
             os.environ.get("GROQ_MODEL_FALLBACK2") or "llama-3.1-70b-versatile",
         ]
 
+    def _rotate_key(self):
+        """Switch to the next API key in the pool, if any remain."""
+        from groq import Groq
+        if self._key_index < len(self.api_keys) - 1:
+            self._key_index += 1
+            self.client = Groq(api_key=self.api_keys[self._key_index])
+            logger.warning(f"[BUDDHI] Rotated to Groq API key #{self._key_index + 1}/{len(self.api_keys)}")
+            return True
+        return False
+
     def chat(self, system, user, max_tokens=1400, temperature=0.1):
         import time
         last_err = None
+        keys_tried_for_current_model = 0
         for i, model in enumerate(self.models):
-            try:
-                resp = self.client.chat.completions.create(
-                    model=model,
-                    messages=[{"role":"system","content":system},{"role":"user","content":user}],
-                    max_tokens=max_tokens, temperature=temperature,
-                )
-                if i > 0:
-                    logger.info(f"[BUDDHI] Used fallback model #{i+1}: {model}")
-                return resp.choices[0].message.content.strip()
-            except Exception as e:
-                err = str(e)
-                last_err = e
-                if "429" in err or "rate_limit" in err.lower():
-                    logger.warning(f"[BUDDHI] Rate limit on {model}, trying next model...")
-                    if i < len(self.models) - 1:
-                        time.sleep(0.5)  # brief pause before next model
-                        continue
-                    # All models exhausted — return minimal valid JSON so UI shows something useful
-                    logger.error(f"[BUDDHI] All models rate-limited. Returning degraded response.")
-                    return '{"answer":"Rate limit reached. Please wait 1-2 minutes and try again. / சற்று நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.","summary":"API rate limit reached","confidence":0,"urgency":"low","findings":[],"recommendation":"Please try again in a few minutes","disclaimer":"⚠️ Doctor confirm பண்ணுங்க."}'  
-                elif "model_not_found" in err.lower() or "does not exist" in err.lower() or "decommissioned" in err.lower() or "400" in err:
-                    logger.warning(f"[BUDDHI] Model {model} not found, skipping...")
-                    continue
-                raise  # Other errors (auth, network) — raise immediately
+            while True:
+                try:
+                    resp = self.client.chat.completions.create(
+                        model=model,
+                        messages=[{"role":"system","content":system},{"role":"user","content":user}],
+                        max_tokens=max_tokens, temperature=temperature,
+                    )
+                    if i > 0:
+                        logger.info(f"[BUDDHI] Used fallback model #{i+1}: {model}")
+                    return resp.choices[0].message.content.strip()
+                except Exception as e:
+                    err = str(e)
+                    last_err = e
+                    if "429" in err or "rate_limit" in err.lower():
+                        # Try the next API key first (same model) before giving up on this model
+                        if self._rotate_key():
+                            time.sleep(0.3)
+                            continue
+                        logger.warning(f"[BUDDHI] Rate limit on {model} (all keys exhausted), trying next model...")
+                        break
+                    elif "model_not_found" in err.lower() or "does not exist" in err.lower() or "decommissioned" in err.lower() or "400" in err:
+                        logger.warning(f"[BUDDHI] Model {model} not found, skipping...")
+                        break
+                    raise  # Other errors (auth, network) — raise immediately
+            if i == len(self.models) - 1:
+                # All models AND all keys exhausted — return minimal valid JSON
+                logger.error(f"[BUDDHI] All models/keys rate-limited. Returning degraded response.")
+                return '{"answer":"Rate limit reached. Please wait 1-2 minutes and try again. / சற்று நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.","summary":"API rate limit reached","confidence":0,"urgency":"low","findings":[],"recommendation":"Please try again in a few minutes","disclaimer":"⚠️ Doctor confirm பண்ணுங்க."}'
         return ""
 
 _engine = None
