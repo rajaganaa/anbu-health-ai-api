@@ -120,6 +120,12 @@ class Chitta:
         self._qdrant_client = None
         self._fallback_chroma = False
         self._setup()
+        # Force the embedding model to load NOW, during pipeline warm-up at
+        # startup — previously this only loaded lazily on the first real
+        # user query, meaning every freshly-started replica's first request
+        # paid the full SentenceTransformer load cost (several seconds),
+        # even though the readiness probe had already reported "ready".
+        _get_embedding_model()
 
     def _setup(self):
         qdrant_url = os.environ.get("QDRANT_URL", "")
