@@ -267,6 +267,28 @@ async def ready():
 async def root():
     return {"message": "Anbu Health AI API — /docs for Swagger, /health for status"}
 
+@app.get("/api/about")
+async def about():
+    """
+    User-facing app/developer info — meant for a Settings/About screen in the
+    frontend, NOT shown inline in chat. Separate from /health (which is an
+    internal diagnostics endpoint, not meant for end users).
+    """
+    return {
+        "app_name": "Anbu Health AI",
+        "version": "2.0.0",
+        "description": "AI-powered health information assistant — helps you understand symptoms, lab reports, scans, and medicines in simple language. This is educational information only; it does not replace a doctor's diagnosis or decision.",
+        "languages": ["Tamil", "English", "Tanglish"],
+        "developer": {
+            "name": "Rajaganapathy M",
+            "affiliation": "SRM University",
+            "email": "rajaganaa@gmail.com",
+            "phone": "9176631419",
+        },
+        "patent": "202641043947",
+        "disclaimer": "⚠️ This app provides general health information only. It does not diagnose conditions or prescribe treatment. Always consult a qualified doctor for medical decisions.",
+    }
+
 # ── Phone OTP Authentication (MSG91) ───────────────────────────────────────────
 @app.post("/api/auth/send-otp")
 @app.post("/api/send-otp")
@@ -353,7 +375,7 @@ async def user_history(phone: str, limit: int = 50):
 
 # ── Main analysis endpoint ─────────────────────────────────────────────────────
 @app.post("/api/analyze")
-@limiter.limit("100/minute")
+@limiter.limit("15/minute")
 async def analyze(
     request: Request,
     question: str = Form(...),
