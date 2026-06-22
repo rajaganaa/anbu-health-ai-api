@@ -130,6 +130,11 @@ def _extract_pdf_text(pdf_path: str) -> str:
 
 def _parse_json(raw: str) -> Dict:
     clean = re.sub(r'```(?:json)?\s*', '', raw).strip().strip('`').strip()
+    # LLMs frequently emit trailing commas before a closing ] or } (valid in
+    # JS/Python literals, invalid in strict JSON) — this was the actual cause
+    # of lab-report responses silently falling back to a raw, unparsed text
+    # dump instead of structured data. Strip them before attempting to parse.
+    clean = re.sub(r',(\s*[\]}])', r'\1', clean)
     try:
         return json.loads(clean)
     except Exception:
