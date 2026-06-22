@@ -123,13 +123,7 @@ SCHEDULE_H1_DRUGS = {
 SENSITIVE_DATA_REDACTION = [
     (r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b', '[AADHAAR REDACTED]'),   # Aadhaar
     (r'\b[A-Z]{5}\d{4}[A-Z]\b', '[PAN REDACTED]'),                  # PAN card
-    # NOTE: deliberately NOT redacting generic 10-digit numbers here — that
-    # pattern is too broad and would also mangle dosage figures, clinic phone
-    # numbers we deliberately show the user, lab values, etc. If a phone
-    # number genuinely needs redacting before DB storage, redact only the
-    # specific field/column it belongs to at the call site (e.g. before
-    # logging a free-text question that happens to contain a phone number),
-    # not by blind regex over every response.
+    (r'\b\d{10}\b', '[MOBILE REDACTED]'),                            # Mobile number (10-digit)
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
