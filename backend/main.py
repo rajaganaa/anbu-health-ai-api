@@ -265,6 +265,28 @@ async def ready():
 async def root():
     return {"message": "Anbu Health AI API — /docs for Swagger, /health for status"}
 
+@app.get("/api/about")
+async def about():
+    """
+    User-facing app/developer info — meant for a Settings/About screen in the
+    frontend, NOT shown inline in chat.
+    """
+    return {
+        "app_name": "Anbu Health AI",
+        "version": "2.1.0",
+        "description": "AI-powered health information assistant — helps you understand symptoms, lab reports, scans, and medicines in simple language. This is educational information only; it does not replace a doctor's diagnosis or decision.",
+        "languages": ["Tamil", "English", "Tanglish"],
+        "developer": {
+            "name": "Rajaganapathy M",
+            "affiliation": "SRM University",
+            "email": "rajaganaa@gmail.com",
+            "phone": "9176631419",
+        },
+        "patent": "202641043947",
+        "compliance": "Telemedicine Practice Guidelines 2020 + DPDP Act 2023",
+        "disclaimer": "⚠️ This app provides general health information only. It does not diagnose conditions or prescribe treatment. Always consult a qualified doctor for medical decisions.",
+    }
+
 # ── Phone OTP Authentication (MSG91) ──────────────────────────────────────────
 @app.post("/api/auth/send-otp")
 @app.post("/api/send-otp")
