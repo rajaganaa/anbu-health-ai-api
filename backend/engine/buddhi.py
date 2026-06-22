@@ -11,6 +11,24 @@ logger = logging.getLogger(__name__)
 GROQ_MODEL = os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile"  # hardcoded fallback — Azure strips empty env vars
 TAMIL_RE   = re.compile(r'[\u0B80-\u0BFF]')
 
+# Real clinic info, shown to patients when the bot flags medium/high urgency.
+# Hardcoded (not LLM-generated) so it's always accurate — never invented or
+# altered by the model. Update here if clinic details change.
+CLINIC_INFO = {
+    "clinic_name": "Anbu Clinic",
+    "address": "Pappakudi, Ariyalur District, Tamil Nadu",
+    "doctors": [
+        {"name": "Dr. Raghul M.D", "title": "Assistant Professor"},
+        {"name": "Dr. Rajeswari M.D", "title": "PHC Kattumannarkoil"},
+    ],
+    "phone": "9176634174",
+    "hours": {
+        "weekdays": "Morning 9:00–12:00 AM, Evening 5:00–9:30 PM",
+        "weekend":  "Morning 9:00–1:00 PM, Evening 5:00–10:00 PM",
+    },
+    "facilities": ["Lab", "Scan", "Pharmacy"],
+}
+
 def detect_language(text: str) -> str:
     if len(TAMIL_RE.findall(text)) >= 3: return "ta"
     if re.search(r'\bin tamil\b|\btamil\b|\bதமிழ்\b', text, re.IGNORECASE): return "ta"
@@ -459,6 +477,12 @@ class Buddhi:
                 "lab_name":          pick(vi.get("lab_name"), parsed.get("lab_name")),
                 "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
             })
+
+        # Real clinic referral info — hardcoded, never LLM-generated, so it's
+        # never hallucinated. Shown only when urgency suggests the patient
+        # should actually see a doctor.
+        if sr.get("urgency") in ("medium", "high"):
+            sr["clinic_referral"] = CLINIC_INFO
 
         return {
             "draft_answer":        answer,
