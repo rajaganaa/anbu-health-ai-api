@@ -15,6 +15,7 @@ import os
 import uuid
 import logging
 import time
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -418,6 +419,7 @@ async def analyze(
     image: Optional[UploadFile] = File(None),
     phone: Optional[str] = Form(default=None),
     chat_id: Optional[str] = Form(default=None),
+    chat_history: Optional[str] = Form(default=None),
 ):
     req_id = str(uuid.uuid4())[:8]
     t_start = time.time()
@@ -425,13 +427,13 @@ async def analyze(
 
     # ── Server-side daily prompt limit ────────────────────────────────────────
     if phone:
-        status_r = db.get_prompt_status(phone)
+        status_r = db.get_token_status(phone)
         if not status_r["allowed"]:
             raise HTTPException(
                 status_code=429,
                 detail={
                     "error":   "daily_limit_reached",
-                    "message": "Today's 20 prompts முடிந்தது. நாளைக்கு வா! (Resets at midnight)",
+                    "message": "Today's usage limit முடிந்தது. நாளைக்கு வா! (Resets at midnight)",
                     "prompts": status_r,
                 },
             )
@@ -474,9 +476,22 @@ async def analyze(
     # ── Manas → Chitta → Buddhi → Ahamkara → Sakshi ──────────────────────────
     manas_r    = p["manas"].route(question, mode)
     chitta_r   = p["chitta"].retrieve(question, manas_r.get("entities", []), k=5)
+
+    # Build chat history context from last 6 messages
+    history_context = ""
+    if chat_history:
+        try:
+            msgs = json.loads(chat_history)[-6:]
+            history_context = "\n".join(
+                f"{'User' if m['role']=='user' else 'AI'}: {m['content']}"
+                for m in msgs
+            ) + "\n\n"
+        except Exception:
+            pass
+
     buddhi_r   = p["buddhi"].reason(
         question=question,
-        context_str=chitta_r["context_str"],
+        context_str=history_context + chitta_r["context_str"],
         q_type=manas_r["question_type"],
         mode=mode,
         vision_info=vision_result,
@@ -521,7 +536,7 @@ async def analyze(
     # ── Supabase: prompt count + redacted chat history ─────────────────────────
     prompts_status = None
     if phone:
-        prompts_status = db.increment_prompt_count(phone)
+        prompts_status = db.increment_token_count(phone, buddhi_r.get("usage_tokens", 0))
         try:
             # DPDP Act: redact sensitive data before storing
             safe_question = redact_sensitive_data(question)
