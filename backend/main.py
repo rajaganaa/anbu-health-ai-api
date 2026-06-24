@@ -482,10 +482,18 @@ async def analyze(
     if chat_history:
         try:
             msgs = json.loads(chat_history)[-6:]
-            history_context = "\n".join(
-                f"{'User' if m['role']=='user' else 'AI'}: {m['content']}"
-                for m in msgs
-            ) + "\n\n"
+            history_lines = []
+            for m in msgs:
+                role = "User" if m.get("role") == "user" else "AI"
+                # Use plain content only; skip file-only messages
+                content = m.get("content", "")
+                if isinstance(content, str) and content.strip():
+                    # Truncate very long AI responses to 300 chars for context
+                    if role == "AI" and len(content) > 300:
+                        content = content[:300] + "..."
+                    history_lines.append(f"{role}: {content}")
+            if history_lines:
+                history_context = "Previous conversation:\n" + "\n".join(history_lines) + "\n\nCurrent question: "
         except Exception:
             pass
 
