@@ -17,6 +17,57 @@ import logging
 import time
 import json
 from pathlib import Path
+
+def _build_file_context_str(file_context_json: str | None) -> str:
+    """
+    Convert stored file_context (vision_result JSON from a previous file upload)
+    into a high-priority context string prepended to RAG results.
+    This ensures follow-up questions about patient name, lab name, test values etc.
+    are answered from the ACTUAL uploaded file, not from RAG hallucination.
+    """
+    if not file_context_json:
+        return ""
+    try:
+        ctx = json.loads(file_context_json)
+        if not isinstance(ctx, dict):
+            return ""
+        lines = ["=== UPLOADED FILE DATA (use this for any follow-up questions) ==="]
+        # Patient / report metadata
+        for field in ["patient_name","age","gender","report_date","lab_name","doctor_name",
+                       "scan_provider","scan_date","drug_name","manufacturer","expiry"]:
+            val = ctx.get(field, "")
+            if val and str(val).strip() and str(val).strip() not in ("null","None",""):
+                lines.append(f"{field.replace('_',' ').title()}: {val}")
+        # Summary
+        if ctx.get("summary"):
+            lines.append(f"Summary: {ctx['summary']}")
+        # Test results
+        if ctx.get("tests"):
+            lines.append("Test Results:")
+            for t in ctx["tests"][:30]:  # limit to 30 tests
+                name = t.get("name","")
+                val  = t.get("value","")
+                unit = t.get("unit","")
+                flag = t.get("flag","")
+                if name and val:
+                    lines.append(f"  {name}: {val} {unit} {flag}".strip())
+        # Medicine fields
+        for field in ["uses","dosage","side_effects","warnings","contraindications"]:
+            val = ctx.get(field)
+            if val:
+                if isinstance(val, list):
+                    lines.append(f"{field.title()}: {', '.join(str(v) for v in val[:5])}")
+                else:
+                    lines.append(f"{field.title()}: {str(val)[:200]}")
+        # Findings (scan)
+        if ctx.get("findings"):
+            lines.append(f"Findings: {ctx['findings'][:300]}")
+        lines.append("=== END OF FILE DATA ===\n")
+        return "\n".join(lines) + "\n"
+    except Exception:
+        return ""
+
+
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
@@ -420,6 +471,7 @@ async def analyze(
     phone: Optional[str] = Form(default=None),
     chat_id: Optional[str] = Form(default=None),
     chat_history: Optional[str] = Form(default=None),
+    file_context: Optional[str] = Form(default=None),  # serialized vision_result from previous file analysis
 ):
     req_id = str(uuid.uuid4())[:8]
     t_start = time.time()
@@ -518,7 +570,7 @@ async def analyze(
 
     buddhi_r   = p["buddhi"].reason(
         question=question,
-        context_str=history_context + chitta_r["context_str"],
+        context_str=history_context + _build_file_context_str(file_context) + chitta_r["context_str"],
         q_type=manas_r["question_type"],
         mode=mode,
         vision_info=vision_result,
@@ -611,10 +663,11 @@ async def analyze(
         # ── Compliance fields (NEW) ────────────────────────────────────────────
         "final_answer":          compliant_answer,
         "compliance_disclaimer": compliance_r["compliance_disclaimer"],
-        "emergency_alert":       compliance_r.get("emergency_alert"),   # None or string
+        "emergency_alert":       compliance_r.get("emergency_alert"),
         "sources":               chitta_r["sources"],
         "confidence":            ahamkara_r.get("confidence_score", 0),
         "prompts":               prompts_status,
+        "file_context":          json.dumps(vision_result) if vision_result and not vision_result.get("error") else None,
     })
 
 # ── Legacy endpoint ────────────────────────────────────────────────────────────
