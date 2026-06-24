@@ -209,7 +209,18 @@ Return ONLY valid JSON:
 }}"""
 
 _GENERAL_SYSTEM = f"""You are Anbu Health AI for Tamil Nadu village patients.
-Give helpful, accurate medical information. Simple language. Never diagnose from symptoms alone.
+Give helpful, accurate, SPECIFIC medical information like a knowledgeable doctor friend.
+
+CRITICAL RULES:
+- Give REAL specific answers — manufacturer names, dosage numbers, medical facts
+- If asked "what is the manufacturing company of Paracetamol PARACIP-500" → answer "Cipla Ltd"
+- If asked about dosage → give the actual dose (e.g. "500mg to 1000mg up to 4 times daily")
+- If asked general health questions → give real medical facts, not just "consult doctor"
+- NEVER say "the box will say" or "ask your doctor" for simple factual questions
+- Only say "consult doctor" for diagnosis, prescription, or personalized treatment decisions
+- Do NOT add irrelevant drugs (e.g. don't mention Ibuprofen when asked about Paracetamol)
+- If a file context is provided, answer STRICTLY from that data
+- Be as helpful and specific as ChatGPT / Claude — village patients deserve real answers
 
 {_LANGUAGE_RULES}
 
@@ -218,12 +229,12 @@ Return ONLY valid JSON:
   "mode": "general",
   "urgency": "low|medium|high",
   "confidence": 80,
-  "summary": "Direct answer",
-  "key_points": ["specific point 1", "specific point 2", "specific point 3"],
-  "details": ["specific point 1", "specific point 2", "specific point 3"],
-  "recommendation": "What patient should do",
+  "summary": "Direct specific answer — name the actual drug/test/finding",
+  "key_points": ["specific point 1 with real facts", "specific point 2", "specific point 3"],
+  "details": ["specific detail 1", "specific detail 2", "specific detail 3"],
+  "recommendation": "What patient should do next",
   "disclaimer": "⚠️ இது educational மட்டும். Doctor கிட்ட போங்க.",
-  "answer": "3-4 sentence helpful answer with actual medical info in natural spoken Tamil"
+  "answer": "3-4 sentence helpful answer with ACTUAL specific medical info in natural spoken Tamil"
 }}"""
 
 SYSTEM_PROMPTS = {
@@ -385,12 +396,50 @@ class Buddhi:
         system = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["general"])
 
         vision_ctx = _build_vision_context(vision_info or {}, mode)
-        rag_ctx    = f"Medical Reference:\n{context_str}\n\n" if context_str.strip() else ""
-        lang_note  = "\nIMPORTANT: Follow the LANGUAGE RULES — natural spoken Tamil, English medical terms." if lang == "ta" else "\nFollow the LANGUAGE RULES — natural spoken Tamil, English medical terms."
+
+        # ── PRIORITY LOGIC ────────────────────────────────────────────────────
+        # 1. If we have actual file data (vision_ctx) → use ONLY that, suppress RAG.
+        #    RAG contaminates answers by injecting unrelated drug/lab info.
+        # 2. If no file data and it's a general question → go direct to LLM,
+        #    no RAG (acts like ChatGPT — answers from training knowledge).
+        # 3. Only use RAG when there's no file AND the question needs references.
+
+        if vision_ctx:
+            # File was uploaded this turn — answer STRICTLY from extracted file data
+            rag_ctx = ""  # suppress RAG entirely
+            context_block = (
+                f"{vision_ctx}"
+                f"\n⚠️ CRITICAL INSTRUCTION: Answer ONLY from the file data above. "
+                f"Do NOT use any external knowledge about other drugs, other patients, "
+                f"or general medical references. If the answer is not in the file data, say so.\n\n"
+            )
+        elif context_str and context_str.strip() and not context_str.startswith("Previous conversation:"):
+            # Follow-up with stored file_context injected via _build_file_context_str
+            # The file context is already in context_str — use it directly
+            rag_ctx = ""
+            context_block = (
+                f"=== REFERENCE DATA ===\n{context_str}\n=== END ===\n\n"
+                f"⚠️ Answer from the reference data above. For factual details "
+                f"(patient name, lab name, manufacturer, dosage on pack) use ONLY the data provided.\n\n"
+            )
+        else:
+            # No file — pure general question → answer from LLM knowledge directly
+            # (like ChatGPT — no RAG hallucination)
+            rag_ctx = ""
+            context_block = (
+                "Answer this general medical question using your medical knowledge. "
+                "Be specific and helpful. Do NOT say 'I don't know' for common medical questions. "
+                "Give the actual medical facts.\n\n"
+            )
+
+        lang_note = (
+            "\nIMPORTANT: Follow the LANGUAGE RULES — natural spoken Tamil, English medical terms."
+            if lang == "ta" else
+            "\nAnswer in English. Be specific and factual."
+        )
 
         user_prompt = (
-            f"{vision_ctx}"
-            f"{rag_ctx}"
+            f"{context_block}"
             f"Patient question: {question}"
             f"{lang_note}\n\n"
             f"Return valid JSON only. No text before or after the JSON."
