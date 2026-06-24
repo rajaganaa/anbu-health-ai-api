@@ -568,12 +568,21 @@ async def analyze(
 
     chitta_r   = p["chitta"].retrieve(retrieval_query, manas_r.get("entities", []), k=5)
 
+    # If no fresh vision_result but we have stored file_context from a previous upload,
+    # parse it and use as vision_info so buddhi suppresses RAG and answers from file data
+    effective_vision = vision_result
+    if not effective_vision and file_context:
+        try:
+            effective_vision = json.loads(file_context)
+        except Exception:
+            effective_vision = None
+
     buddhi_r   = p["buddhi"].reason(
         question=question,
         context_str=history_context + _build_file_context_str(file_context) + chitta_r["context_str"],
         q_type=manas_r["question_type"],
         mode=mode,
-        vision_info=vision_result,
+        vision_info=effective_vision,
     )
     ahamkara_r = p["ahamkara"].score(buddhi_r, chitta_r, question)
     sakshi_r   = p["sakshi"].verify(
