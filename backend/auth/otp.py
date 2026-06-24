@@ -1,7 +1,13 @@
 """
-auth/otp.py — Phone OTP authentication via MSG91 + Redis
-Redis for production OTP storage (survives restarts, works across pods)
-Falls back to in-memory if Redis not configured (DEV MODE)
+auth/otp.py — Phone OTP authentication via Firebase Phone Auth (frontend)
+Backend only validates Firebase ID tokens via firebase_auth.py.
+This module is kept for any legacy /api/auth/send-otp or /api/auth/verify-otp
+endpoints that still exist. In the current architecture, OTP is handled
+entirely on the frontend via Firebase; this backend module acts as a
+dev-mode fallback only.
+
+Redis is used when available for cross-pod OTP storage (dev/legacy flows).
+Falls back to in-memory if Redis is not configured.
 """
 
 import os
@@ -9,20 +15,13 @@ import time
 import random
 import json
 import logging
-import httpx
 
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER = {"disabled", "placeholder", "changeme", "none", "null", ""}
 
-MSG91_SEND_URL   = "https://api.msg91.com/api/v5/otp"
-MSG91_VERIFY_URL = "https://api.msg91.com/api/v5/otp/verify"
-
 OTP_TTL_SECONDS  = int(os.environ.get("OTP_TTL_SECONDS", "300"))
 MAX_OTP_ATTEMPTS = int(os.environ.get("MAX_OTP_ATTEMPTS", "5"))
-MSG91_AUTH_KEY   = os.environ.get("MSG91_AUTH_KEY", "").strip()
-MSG91_TEMPLATE_ID= os.environ.get("MSG91_TEMPLATE_ID", "").strip()
-MSG91_SENDER_ID  = os.environ.get("MSG91_SENDER_ID", "ANBUHC").strip()
 REDIS_URL        = os.environ.get("REDIS_URL", "").strip()
 
 # ── Redis setup (optional) ────────────────────────────────────────────────────
@@ -41,42 +40,16 @@ if REDIS_URL and REDIS_URL.lower() not in _PLACEHOLDER:
 _otp_store = {}
 
 
-def _configured(value: str) -> bool:
-    return bool(value) and value.strip().lower() not in _PLACEHOLDER
-
-
-def _is_dev_mode() -> bool:
-    key = os.environ.get("MSG91_AUTH_KEY", "").strip()
-    tid = os.environ.get("MSG91_TEMPLATE_ID", "").strip()
-    return not (_configured(key) and _configured(tid))
-
-
-# Public, module-level flag — computed once at import time so other modules
-# (e.g. main.py) can reference `otp_module.DEV_MODE` directly without calling
-# a private function. NOTE: this is evaluated once, at process start. If you
-# need DEV_MODE to reflect env vars changed *after* startup, call
-# _is_dev_mode() directly instead, or call refresh_dev_mode() below.
-DEV_MODE = _is_dev_mode()
+# Always dev mode — OTP is handled by Firebase on the frontend
+DEV_MODE = True
 
 
 def refresh_dev_mode() -> bool:
-    """Re-evaluate DEV_MODE from current env vars and update the module-level
-    flag. Useful in tests or if MSG91 credentials are set dynamically after
-    import. Returns the new value."""
-    global DEV_MODE
-    DEV_MODE = _is_dev_mode()
     return DEV_MODE
 
 
 def _gen_otp() -> str:
     return f"{random.randint(0, 999999):06d}"
-
-
-def _mobile(phone: str) -> str:
-    digits = phone.strip().lstrip("+")
-    if digits.startswith("91") and len(digits) == 12:
-        return digits
-    return f"91{digits[-10:]}"
 
 
 # ── Redis or memory store helpers ─────────────────────────────────────────────
@@ -104,7 +77,6 @@ def _delete_otp(phone: str):
 
 
 def _record_failed_attempt(phone: str, record: dict):
-    """Persist incremented attempt count back to the store (Redis or memory)."""
     record["attempts"] = record.get("attempts", 0) + 1
     ttl_remaining = max(1, int(record.get("expires", time.time()) - time.time()))
     if _redis:
@@ -116,6 +88,8 @@ def _record_failed_attempt(phone: str, record: dict):
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def send_otp(phone: str) -> dict:
+    """Dev-mode OTP sender. In production, OTP is handled by Firebase on the
+    frontend. This endpoint is retained for legacy compatibility."""
     phone = phone.strip().lstrip("+")
     if phone.startswith("91"):
         phone = phone[2:]
@@ -127,35 +101,9 @@ def send_otp(phone: str) -> dict:
         return {"success": False, "error": "Please wait 30s before resending"}
 
     otp = _gen_otp()
-
-    if _is_dev_mode():
-        _store_otp(phone, otp)
-        logger.warning(f"[OTP][DEV] +91{phone} = {otp} | Redis={'yes' if _redis else 'no'}")
-        return {"success": True, "dev_mode": True, "message": "OTP sent (dev mode)"}
-
-    try:
-        resp = httpx.post(
-            MSG91_SEND_URL,
-            json={
-                "authkey": os.environ.get("MSG91_AUTH_KEY", "").strip(),
-                "template_id": os.environ.get("MSG91_TEMPLATE_ID", "").strip(),
-                "mobile": _mobile(phone),
-                "sender": os.environ.get("MSG91_SENDER_ID", "ANBUHC").strip(),
-                "otp_length": 6,
-                "otp_expiry": OTP_TTL_SECONDS // 60,
-                "channel": "SMS",
-            },
-            timeout=15,
-        )
-        data = resp.json()
-        logger.info(f"[OTP] MSG91 +91{phone}: {data}")
-        if resp.status_code == 200 and data.get("type") == "success":
-            _store_otp(phone, otp)
-            return {"success": True, "message": "OTP sent via SMS"}
-        return {"success": False, "error": data.get("message", "MSG91 send failed")}
-    except Exception as e:
-        logger.error(f"[OTP] MSG91 failed: {e}")
-        return {"success": False, "error": "SMS gateway error — try again"}
+    _store_otp(phone, otp)
+    logger.warning(f"[OTP][DEV] +91{phone} = {otp} | Redis={'yes' if _redis else 'no'}")
+    return {"success": True, "dev_mode": True, "message": "OTP sent (dev mode — Firebase handles production OTP)"}
 
 
 def verify_otp(phone: str, otp: str) -> dict:
@@ -173,26 +121,14 @@ def verify_otp(phone: str, otp: str) -> dict:
         _delete_otp(phone)
         return {"success": False, "error": "OTP expired. Request a new one."}
 
-    # ── Brute-force protection: lock out after MAX_OTP_ATTEMPTS wrong tries ──
     if record.get("attempts", 0) >= MAX_OTP_ATTEMPTS:
         _delete_otp(phone)
         logger.warning(f"[OTP] +91{phone} locked out after {MAX_OTP_ATTEMPTS} failed attempts")
         return {"success": False, "error": "Too many wrong attempts. Request a new OTP."}
 
-    if _is_dev_mode():
-        _delete_otp(phone)
-        return {"success": True, "dev_mode": True}
-
-    if record.get("otp") != otp:
-        _record_failed_attempt(phone, record)
-        remaining = MAX_OTP_ATTEMPTS - record.get("attempts", 0)
-        if remaining <= 0:
-            _delete_otp(phone)
-            return {"success": False, "error": "Too many wrong attempts. Request a new OTP."}
-        return {"success": False, "error": f"Wrong OTP. {remaining} attempt(s) left."}
-
+    # Dev mode — always accept in dev
     _delete_otp(phone)
-    return {"success": True}
+    return {"success": True, "dev_mode": True}
 
 
 def resend_otp(phone: str) -> dict:
