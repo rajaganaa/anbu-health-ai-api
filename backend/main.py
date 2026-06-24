@@ -475,27 +475,46 @@ async def analyze(
 
     # ── Manas → Chitta → Buddhi → Ahamkara → Sakshi ──────────────────────────
     manas_r    = p["manas"].route(question, mode)
-    chitta_r   = p["chitta"].retrieve(question, manas_r.get("entities", []), k=5)
 
-    # Build chat history context from last 6 messages
+    # Build chat history context from last 6 messages BEFORE retrieval
+    # so we can augment the retrieval query with the conversation subject
     history_context = ""
+    history_subject = ""  # e.g. "Paracetamol" or "diabetes blood sugar"
     if chat_history:
         try:
             msgs = json.loads(chat_history)[-6:]
             history_lines = []
             for m in msgs:
                 role = "User" if m.get("role") == "user" else "AI"
-                # Use plain content only; skip file-only messages
                 content = m.get("content", "")
                 if isinstance(content, str) and content.strip():
-                    # Truncate very long AI responses to 300 chars for context
                     if role == "AI" and len(content) > 300:
                         content = content[:300] + "..."
                     history_lines.append(f"{role}: {content}")
             if history_lines:
                 history_context = "Previous conversation:\n" + "\n".join(history_lines) + "\n\nCurrent question: "
+            # Extract subject from last user message that had a file (medicine/scan/lab)
+            for m in reversed(msgs):
+                if m.get("role") == "user" and m.get("file"):
+                    c = m.get("content", "")
+                    if c and len(c) > 3:
+                        history_subject = c[:120]
+                        break
+                elif m.get("role") == "assistant":
+                    c = m.get("content", "")
+                    if c and len(c) > 20:
+                        history_subject = c[:120]
+                        break
         except Exception:
             pass
+
+    # Augment retrieval query with conversation subject for better context matching
+    retrieval_query = question
+    if history_subject and len(question.split()) < 8:
+        # Short follow-up question — prepend the subject so RAG finds the right docs
+        retrieval_query = f"{history_subject} {question}"
+
+    chitta_r   = p["chitta"].retrieve(retrieval_query, manas_r.get("entities", []), k=5)
 
     buddhi_r   = p["buddhi"].reason(
         question=question,
