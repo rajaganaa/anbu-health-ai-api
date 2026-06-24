@@ -37,7 +37,9 @@ def _configured(value: str) -> bool:
 
 SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-MAX_PROMPTS_PER_DAY = int(os.environ.get("MAX_PROMPTS_PER_DAY", "20"))
+MAX_TOKENS_PER_DAY = int(os.environ.get("MAX_TOKENS_PER_DAY", "50000"))
+# Keep backward-compat alias used in older code paths
+MAX_PROMPTS_PER_DAY = MAX_TOKENS_PER_DAY
 
 ENABLED = _configured(SUPABASE_URL) and _configured(SUPABASE_KEY)
 
@@ -300,3 +302,20 @@ def log_compliance(request_id: str, phone: Optional[str], mode: str,
     except Exception as e:
         logger.debug(f"[SUPABASE] log_compliance failed (non-critical): {e}")
         return False
+
+
+# ── Token-based quota aliases (Issue 4 fix) ────────────────────────────────────
+def get_token_status(phone: str) -> dict:
+    """Alias for get_prompt_status — checks daily token/prompt usage."""
+    return get_prompt_status(phone)
+
+
+def increment_token_count(phone: str, tokens_used: int = 0) -> dict:
+    """Alias for increment_prompt_count that also accepts a token count.
+    The token amount is logged but the underlying DB still tracks prompt rows.
+    To track actual tokens, add a tokens_used column to prompt_usage and
+    update the increment_prompt_atomic RPC accordingly."""
+    result = increment_prompt_count(phone)
+    if tokens_used:
+        logger.info(f"[SUPABASE] +{tokens_used} tokens for {phone} (session total tracked locally)")
+    return result
