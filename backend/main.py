@@ -17,74 +17,6 @@ import logging
 import time
 import json
 from pathlib import Path
-
-def _build_file_context_str(file_context_json: str | None) -> str:
-    """
-    Convert stored file_context (from frontend file vault) into a high-priority
-    context string prepended to RAG results.
-    Handles both single file and combined multi-file vault format.
-    """
-    if not file_context_json:
-        return ""
-    try:
-        ctx = json.loads(file_context_json)
-        if not isinstance(ctx, dict):
-            return ""
-
-        # Handle combined vault format (multiple files)
-        if "all_files" in ctx:
-            lines = ["=== ALL UPLOADED FILES IN SESSION (use for any follow-up) ==="]
-            for file_entry in ctx.get("all_files", [])[:5]:
-                fname = file_entry.get("file", "unknown")
-                mode  = file_entry.get("mode", "")
-                fc    = file_entry.get("context", {})
-                lines.append(f"\n--- File: {fname} ({mode}) ---")
-                lines.extend(_extract_context_lines(fc))
-            # Also include primary (best match) prominently
-            primary = ctx.get("primary", {})
-            if primary:
-                lines.insert(1, "\n[BEST MATCH for this question]")
-                lines[2:2] = _extract_context_lines(primary)
-            lines.append("\n=== END OF FILE DATA ===\n")
-            return "\n".join(lines) + "\n"
-
-        # Single file format
-        lines = ["=== UPLOADED FILE DATA (use for follow-up questions) ==="]
-        lines.extend(_extract_context_lines(ctx))
-        lines.append("=== END OF FILE DATA ===\n")
-        return "\n".join(lines) + "\n"
-    except Exception:
-        return ""
-
-
-def _extract_context_lines(ctx: dict) -> list:
-    """Extract readable lines from a vision_result dict."""
-    lines = []
-    for field in ["patient_name","age","gender","report_date","lab_name","doctor_name",
-                   "scan_provider","scan_date","drug_name","manufacturer","expiry",
-                   "brand_name","company","batch_number","mrp"]:
-        val = ctx.get(field, "")
-        if val and str(val).strip() not in ("null","None",""):
-            lines.append(f"{field.replace('_',' ').title()}: {val}")
-    if ctx.get("summary"):
-        lines.append(f"Summary: {ctx['summary']}")
-    if ctx.get("tests"):
-        lines.append("Test Results:")
-        for t in ctx["tests"][:30]:
-            name = t.get("name",""); val = t.get("value","")
-            unit = t.get("unit",""); flag = t.get("flag","")
-            if name and val:
-                lines.append(f"  {name}: {val} {unit} {flag}".strip())
-    for field in ["uses","dosage","side_effects","warnings","findings"]:
-        val = ctx.get(field)
-        if val:
-            if isinstance(val, list):
-                lines.append(f"{field.title()}: {', '.join(str(v) for v in val[:5])}")
-            else:
-                lines.append(f"{field.title()}: {str(val)[:200]}")
-    return lines
-
-
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
@@ -488,7 +420,7 @@ async def analyze(
     phone: Optional[str] = Form(default=None),
     chat_id: Optional[str] = Form(default=None),
     chat_history: Optional[str] = Form(default=None),
-    file_context: Optional[str] = Form(default=None),  # serialized vision_result from previous file analysis
+    file_context: Optional[str] = Form(default=None),  # JSON vault from frontend
 ):
     req_id = str(uuid.uuid4())[:8]
     t_start = time.time()
@@ -542,101 +474,84 @@ async def analyze(
             logger.warning(f"[{req_id}] Vision failed: {e}")
             vision_result = {"error": str(e)}
 
+    # ── File Vault: inject stored vision data for follow-up questions ──────────
+    # When the user asks a follow-up (no new image upload) the frontend sends
+    # the entire fileVault as `file_context` JSON so Groq can answer from the
+    # ACTUAL extracted data instead of hallucinating.
+    if not vision_result and file_context:
+        try:
+            vault = json.loads(file_context)  # {"filename": {vision_dict}, ...}
+            if isinstance(vault, dict):
+                # Collect all non-error vault entries
+                valid_entries = [
+                    v for v in vault.values()
+                    if isinstance(v, dict) and not v.get("error")
+                ]
+                if valid_entries:
+                    if len(valid_entries) == 1:
+                        # Single file — use as-is
+                        effective_vision = valid_entries[0]
+                    else:
+                        # Multiple files — merge: combine tests/findings lists,
+                        # keep scalars from the first valid entry as defaults.
+                        effective_vision = dict(valid_entries[0])  # copy first
+                        for entry in valid_entries[1:]:
+                            # Merge list fields
+                            for list_key in ("tests", "findings", "abnormalities"):
+                                if entry.get(list_key):
+                                    existing = effective_vision.get(list_key, [])
+                                    if isinstance(existing, list):
+                                        effective_vision[list_key] = existing + entry[list_key]
+                                    else:
+                                        effective_vision[list_key] = entry[list_key]
+                            # Merge scalar fields: fill in any that are empty in first entry
+                            for scalar_key in (
+                                "patient_name", "age", "gender", "lab_name", "doctor_name",
+                                "report_date", "scan_date", "scan_provider", "drug_name",
+                                "brand_name", "manufacturer", "expiry", "mfg_date",
+                                "dosage_instructions", "summary", "overall_status",
+                                "scan_type", "body_part", "impression",
+                            ):
+                                if not effective_vision.get(scalar_key) and entry.get(scalar_key):
+                                    effective_vision[scalar_key] = entry[scalar_key]
+
+                    # Determine mode from vault if not already set by a fresh upload
+                    vault_mode = effective_vision.get("mode", "")
+                    if vault_mode and vault_mode in ("lab", "scan", "medicine") and mode == "general":
+                        mode = vault_mode
+                        logger.info(f"[{req_id}] Mode elevated from vault: {mode}")
+
+                    vision_result = effective_vision
+                    logger.info(
+                        f"[{req_id}] Vault injected ({len(valid_entries)} file(s)): "
+                        f"lab_name={effective_vision.get('lab_name','?')} "
+                        f"patient={effective_vision.get('patient_name','?')}"
+                    )
+        except Exception as e:
+            logger.warning(f"[{req_id}] file_context parse error: {e}")
+
     # ── Manas → Chitta → Buddhi → Ahamkara → Sakshi ──────────────────────────
     manas_r    = p["manas"].route(question, mode)
+    chitta_r   = p["chitta"].retrieve(question, manas_r.get("entities", []), k=5)
 
-    # Build chat history context from last 6 messages BEFORE retrieval
-    # so we can augment the retrieval query with the conversation subject
+    # Build chat history context from last 6 messages
     history_context = ""
-    history_subject = ""  # e.g. "Paracetamol" or "diabetes blood sugar"
     if chat_history:
         try:
             msgs = json.loads(chat_history)[-6:]
-            history_lines = []
-            for m in msgs:
-                role = "User" if m.get("role") == "user" else "AI"
-                content = m.get("content", "")
-                if isinstance(content, str) and content.strip():
-                    if role == "AI" and len(content) > 300:
-                        content = content[:300] + "..."
-                    history_lines.append(f"{role}: {content}")
-            if history_lines:
-                history_context = "Previous conversation:\n" + "\n".join(history_lines) + "\n\nCurrent question: "
-            # Extract subject from last user message that had a file (medicine/scan/lab)
-            for m in reversed(msgs):
-                if m.get("role") == "user" and m.get("file"):
-                    c = m.get("content", "")
-                    if c and len(c) > 3:
-                        history_subject = c[:120]
-                        break
-                elif m.get("role") == "assistant":
-                    c = m.get("content", "")
-                    if c and len(c) > 20:
-                        history_subject = c[:120]
-                        break
+            history_context = "\n".join(
+                f"{'User' if m['role']=='user' else 'AI'}: {m['content']}"
+                for m in msgs
+            ) + "\n\n"
         except Exception:
             pass
 
-    # Augment retrieval query with conversation subject for better context matching
-    retrieval_query = question
-    if history_subject and len(question.split()) < 8:
-        # Short follow-up question — prepend the subject so RAG finds the right docs
-        retrieval_query = f"{history_subject} {question}"
-
-    chitta_r   = p["chitta"].retrieve(retrieval_query, manas_r.get("entities", []), k=5)
-
-    # If no fresh vision_result but we have stored file_context from a previous upload,
-    # parse it and use as vision_info so buddhi suppresses RAG and answers from file data
-    effective_vision = vision_result
-    if not effective_vision and file_context:
-        try:
-            parsed_fc = json.loads(file_context)
-            # Handle combined vault format {primary: {...}, all_files: [...]}
-            # vs single file format (direct vision_result dict)
-            if isinstance(parsed_fc, dict):
-                if "all_files" in parsed_fc:
-                    # Multi-file vault — use primary (best match) as vision_info
-                    # but also store all_files for context building
-                    primary = parsed_fc.get("primary", {})
-                    all_files = parsed_fc.get("all_files", [])
-                    # Determine mode from best matching file
-                    if primary and primary.get("mode"):
-                        effective_vision = primary
-                    elif all_files:
-                        # Use first file as primary
-                        effective_vision = all_files[0].get("context", {})
-                    # Merge all test data and metadata into effective_vision
-                    # so _build_vision_context sees everything
-                    if effective_vision and all_files:
-                        for f_entry in all_files:
-                            fc_data = f_entry.get("context", {})
-                            # Add fields not already in primary
-                            for key in ["lab_name","patient_name","scan_provider",
-                                        "manufacturer","drug_name","brand_name",
-                                        "report_date","scan_date","doctor_name"]:
-                                if not effective_vision.get(key) and fc_data.get(key):
-                                    effective_vision[key] = fc_data[key]
-                        # Use mode from file entry
-                        effective_vision["_all_modes"] = [f.get("mode") for f in all_files]
-                        effective_vision["_all_files"] = all_files
-                else:
-                    # Single file — use directly
-                    effective_vision = parsed_fc
-        except Exception as e:
-            logger.warning(f"[ANALYZE] file_context parse failed: {e}")
-            effective_vision = None
-
-    # Determine mode for buddhi — use mode from effective_vision if available
-    effective_mode = mode
-    if effective_vision and effective_vision.get("mode"):
-        effective_mode = effective_vision.get("mode")
-
     buddhi_r   = p["buddhi"].reason(
         question=question,
-        context_str=history_context + _build_file_context_str(file_context) + chitta_r["context_str"],
+        context_str=history_context + chitta_r["context_str"],
         q_type=manas_r["question_type"],
-        mode=effective_mode,
-        vision_info=effective_vision,
+        mode=mode,
+        vision_info=vision_result,
     )
     ahamkara_r = p["ahamkara"].score(buddhi_r, chitta_r, question)
     sakshi_r   = p["sakshi"].verify(
@@ -647,31 +562,6 @@ async def analyze(
         buddhi_result=buddhi_r,
         ahamkara_result=ahamkara_r,
     )
-
-    # ── WEB SEARCH (Perplexity-style citations) ───────────────────────────────
-    # Trigger when: general question with no file upload, or user explicitly
-    # asks about latest guidelines, news, or current info
-    web_search_result = None
-    web_trigger_keywords = [
-        "latest", "new", "current", "2024", "2025", "2026",
-        "guideline", "research", "study", "hospital", "news",
-        "price", "cost", "where to buy", "online", "website",
-    ]
-    is_general_no_file = (not image and not file_context and mode == "general")
-    has_web_keyword = any(k in question.lower() for k in web_trigger_keywords)
-
-    if is_general_no_file or has_web_keyword:
-        try:
-            from tools.web_search import search_medical_web  # lazy import — not needed at module load
-            context_hint = ""
-            if file_context:
-                fc = json.loads(file_context)
-                context_hint = fc.get("drug_name") or fc.get("lab_name") or ""
-            web_search_result = search_medical_web(question, context_hint)
-            logger.info(f"[{req_id}] Web search: {web_search_result.get('sources_found',0)} sources")
-        except Exception as we:
-            logger.warning(f"[{req_id}] Web search failed (non-critical): {we}")
-            web_search_result = None
 
     # ── COMPLIANCE GATE (NEW) ─────────────────────────────────────────────────
     compliance_r = apply_compliance(
@@ -751,13 +641,10 @@ async def analyze(
         # ── Compliance fields (NEW) ────────────────────────────────────────────
         "final_answer":          compliant_answer,
         "compliance_disclaimer": compliance_r["compliance_disclaimer"],
-        "emergency_alert":       compliance_r.get("emergency_alert"),
+        "emergency_alert":       compliance_r.get("emergency_alert"),   # None or string
         "sources":               chitta_r["sources"],
         "confidence":            ahamkara_r.get("confidence_score", 0),
         "prompts":               prompts_status,
-        "file_context":          json.dumps(vision_result) if vision_result and not vision_result.get("error") else None,
-        "web_citations":         web_search_result.get("citations", []) if web_search_result else [],
-        "web_answer":            web_search_result.get("web_answer", "") if web_search_result else "",
     })
 
 # ── Legacy endpoint ────────────────────────────────────────────────────────────
