@@ -289,11 +289,49 @@ def _fallback(mode: str) -> Dict:
 
 # ── Vision Context Builder ─────────────────────────────────────────────────────
 def _build_vision_context(vision_info: Dict, mode: str) -> str:
-    """Convert vision output into detailed context for LLM."""
+    """Convert vision output into detailed context for LLM.
+    Handles both single-file and multi-file vault formats.
+    """
     if not vision_info or vision_info.get("error"): return ""
 
     lines = []
 
+    # ── Multi-file vault format ──────────────────────────────────────────────
+    all_files = vision_info.get("_all_files", [])
+    if all_files:
+        lines.append("=== ALL UPLOADED FILES IN THIS SESSION ===")
+        lines.append("CRITICAL: Use these EXACT values to answer questions about any uploaded file.\n")
+        for i, f_entry in enumerate(all_files, 1):
+            fname   = f_entry.get("file", f"File {i}")
+            fmode   = f_entry.get("mode", "unknown")
+            fc      = f_entry.get("context", {})
+            lines.append(f"--- FILE {i}: {fname} ({fmode}) ---")
+            # Extract all key metadata
+            for key in ["patient_name","age","gender","report_date","lab_name",
+                        "doctor_name","scan_provider","scan_date",
+                        "drug_name","brand_name","generic_name","strength",
+                        "manufacturer","mfg_date","expiry"]:
+                val = fc.get(key,"")
+                if val and val not in ("Not visible","Not detected",""):
+                    lines.append(f"  {key}: {val}")
+            if fc.get("summary"):
+                lines.append(f"  summary: {fc['summary']}")
+            # Lab tests
+            if fmode == "lab" and fc.get("tests"):
+                lines.append(f"  tests ({len(fc['tests'])} total):")
+                for t in fc["tests"][:10]:
+                    n,v,u,s = t.get("name",""),t.get("value",""),t.get("unit",""),t.get("status","")
+                    if n and v: lines.append(f"    {n}: {v} {u} [{s}]")
+                if fc.get("abnormal_count"):
+                    lines.append(f"  abnormal_count: {fc['abnormal_count']}")
+            # Scan findings
+            if fmode == "scan" and fc.get("findings"):
+                lines.append(f"  findings: {', '.join(str(f) for f in fc['findings'][:5])}")
+        lines.append("\n=== END OF UPLOADED FILES ===")
+        lines.append("Answer the question using ONLY the above file data. Reference the specific file by name.")
+        return "\n".join(lines) + "\n\n"
+
+    # ── Single file format ───────────────────────────────────────────────────
     if mode == "lab":
         # Pass actual test values to LLM
         tests = vision_info.get("tests", [])
