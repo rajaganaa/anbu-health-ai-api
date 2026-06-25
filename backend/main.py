@@ -82,7 +82,6 @@ from slowapi.errors import RateLimitExceeded
 from auth.otp import send_otp, verify_otp, resend_otp
 from auth import otp as otp_module
 from db import supabase_client as db
-from tools.web_search import search_medical_web
 
 # ── NEW: Compliance imports ────────────────────────────────────────────────────
 from compliance.safety_layer import (
@@ -609,6 +608,7 @@ async def analyze(
 
     if is_general_no_file or has_web_keyword:
         try:
+            from tools.web_search import search_medical_web  # lazy import — not needed at module load
             context_hint = ""
             if file_context:
                 fc = json.loads(file_context)
