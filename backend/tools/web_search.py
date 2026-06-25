@@ -7,7 +7,6 @@ Like Perplexity — shows answer + sources the user can verify.
 import re
 import json
 import logging
-import requests
 from typing import List, Dict
 
 logger = logging.getLogger(__name__)
@@ -32,6 +31,7 @@ def search_duckduckgo(query: str, max_results: int = 4) -> Dict:
     Returns structured results with sources like Perplexity.
     """
     try:
+        import requests  # lazy import — only needed at call time, not module load
         params = {
             "q": query,
             "format": "json",
