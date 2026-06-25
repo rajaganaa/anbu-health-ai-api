@@ -82,6 +82,7 @@ from slowapi.errors import RateLimitExceeded
 from auth.otp import send_otp, verify_otp, resend_otp
 from auth import otp as otp_module
 from db import supabase_client as db
+from tools.web_search import search_medical_web
 
 # ── NEW: Compliance imports ────────────────────────────────────────────────────
 from compliance.safety_layer import (
@@ -594,6 +595,30 @@ async def analyze(
         ahamkara_result=ahamkara_r,
     )
 
+    # ── WEB SEARCH (Perplexity-style citations) ───────────────────────────────
+    # Trigger when: general question with no file upload, or user explicitly
+    # asks about latest guidelines, news, or current info
+    web_search_result = None
+    web_trigger_keywords = [
+        "latest", "new", "current", "2024", "2025", "2026",
+        "guideline", "research", "study", "hospital", "news",
+        "price", "cost", "where to buy", "online", "website",
+    ]
+    is_general_no_file = (not image and not file_context and mode == "general")
+    has_web_keyword = any(k in question.lower() for k in web_trigger_keywords)
+
+    if is_general_no_file or has_web_keyword:
+        try:
+            context_hint = ""
+            if file_context:
+                fc = json.loads(file_context)
+                context_hint = fc.get("drug_name") or fc.get("lab_name") or ""
+            web_search_result = search_medical_web(question, context_hint)
+            logger.info(f"[{req_id}] Web search: {web_search_result.get('sources_found',0)} sources")
+        except Exception as we:
+            logger.warning(f"[{req_id}] Web search failed (non-critical): {we}")
+            web_search_result = None
+
     # ── COMPLIANCE GATE (NEW) ─────────────────────────────────────────────────
     compliance_r = apply_compliance(
         question=question,
@@ -677,6 +702,8 @@ async def analyze(
         "confidence":            ahamkara_r.get("confidence_score", 0),
         "prompts":               prompts_status,
         "file_context":          json.dumps(vision_result) if vision_result and not vision_result.get("error") else None,
+        "web_citations":         web_search_result.get("citations", []) if web_search_result else [],
+        "web_answer":            web_search_result.get("web_answer", "") if web_search_result else "",
     })
 
 # ── Legacy endpoint ────────────────────────────────────────────────────────────
