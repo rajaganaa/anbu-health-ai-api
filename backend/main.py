@@ -590,15 +590,52 @@ async def analyze(
     effective_vision = vision_result
     if not effective_vision and file_context:
         try:
-            effective_vision = json.loads(file_context)
-        except Exception:
+            parsed_fc = json.loads(file_context)
+            # Handle combined vault format {primary: {...}, all_files: [...]}
+            # vs single file format (direct vision_result dict)
+            if isinstance(parsed_fc, dict):
+                if "all_files" in parsed_fc:
+                    # Multi-file vault — use primary (best match) as vision_info
+                    # but also store all_files for context building
+                    primary = parsed_fc.get("primary", {})
+                    all_files = parsed_fc.get("all_files", [])
+                    # Determine mode from best matching file
+                    if primary and primary.get("mode"):
+                        effective_vision = primary
+                    elif all_files:
+                        # Use first file as primary
+                        effective_vision = all_files[0].get("context", {})
+                    # Merge all test data and metadata into effective_vision
+                    # so _build_vision_context sees everything
+                    if effective_vision and all_files:
+                        for f_entry in all_files:
+                            fc_data = f_entry.get("context", {})
+                            # Add fields not already in primary
+                            for key in ["lab_name","patient_name","scan_provider",
+                                        "manufacturer","drug_name","brand_name",
+                                        "report_date","scan_date","doctor_name"]:
+                                if not effective_vision.get(key) and fc_data.get(key):
+                                    effective_vision[key] = fc_data[key]
+                        # Use mode from file entry
+                        effective_vision["_all_modes"] = [f.get("mode") for f in all_files]
+                        effective_vision["_all_files"] = all_files
+                else:
+                    # Single file — use directly
+                    effective_vision = parsed_fc
+        except Exception as e:
+            logger.warning(f"[ANALYZE] file_context parse failed: {e}")
             effective_vision = None
+
+    # Determine mode for buddhi — use mode from effective_vision if available
+    effective_mode = mode
+    if effective_vision and effective_vision.get("mode"):
+        effective_mode = effective_vision.get("mode")
 
     buddhi_r   = p["buddhi"].reason(
         question=question,
         context_str=history_context + _build_file_context_str(file_context) + chitta_r["context_str"],
         q_type=manas_r["question_type"],
-        mode=mode,
+        mode=effective_mode,
         vision_info=effective_vision,
     )
     ahamkara_r = p["ahamkara"].score(buddhi_r, chitta_r, question)
