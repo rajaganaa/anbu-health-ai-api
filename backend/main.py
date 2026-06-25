@@ -20,10 +20,9 @@ from pathlib import Path
 
 def _build_file_context_str(file_context_json: str | None) -> str:
     """
-    Convert stored file_context (vision_result JSON from a previous file upload)
-    into a high-priority context string prepended to RAG results.
-    This ensures follow-up questions about patient name, lab name, test values etc.
-    are answered from the ACTUAL uploaded file, not from RAG hallucination.
+    Convert stored file_context (from frontend file vault) into a high-priority
+    context string prepended to RAG results.
+    Handles both single file and combined multi-file vault format.
     """
     if not file_context_json:
         return ""
@@ -31,41 +30,59 @@ def _build_file_context_str(file_context_json: str | None) -> str:
         ctx = json.loads(file_context_json)
         if not isinstance(ctx, dict):
             return ""
-        lines = ["=== UPLOADED FILE DATA (use this for any follow-up questions) ==="]
-        # Patient / report metadata
-        for field in ["patient_name","age","gender","report_date","lab_name","doctor_name",
-                       "scan_provider","scan_date","drug_name","manufacturer","expiry"]:
-            val = ctx.get(field, "")
-            if val and str(val).strip() and str(val).strip() not in ("null","None",""):
-                lines.append(f"{field.replace('_',' ').title()}: {val}")
-        # Summary
-        if ctx.get("summary"):
-            lines.append(f"Summary: {ctx['summary']}")
-        # Test results
-        if ctx.get("tests"):
-            lines.append("Test Results:")
-            for t in ctx["tests"][:30]:  # limit to 30 tests
-                name = t.get("name","")
-                val  = t.get("value","")
-                unit = t.get("unit","")
-                flag = t.get("flag","")
-                if name and val:
-                    lines.append(f"  {name}: {val} {unit} {flag}".strip())
-        # Medicine fields
-        for field in ["uses","dosage","side_effects","warnings","contraindications"]:
-            val = ctx.get(field)
-            if val:
-                if isinstance(val, list):
-                    lines.append(f"{field.title()}: {', '.join(str(v) for v in val[:5])}")
-                else:
-                    lines.append(f"{field.title()}: {str(val)[:200]}")
-        # Findings (scan)
-        if ctx.get("findings"):
-            lines.append(f"Findings: {ctx['findings'][:300]}")
+
+        # Handle combined vault format (multiple files)
+        if "all_files" in ctx:
+            lines = ["=== ALL UPLOADED FILES IN SESSION (use for any follow-up) ==="]
+            for file_entry in ctx.get("all_files", [])[:5]:
+                fname = file_entry.get("file", "unknown")
+                mode  = file_entry.get("mode", "")
+                fc    = file_entry.get("context", {})
+                lines.append(f"\n--- File: {fname} ({mode}) ---")
+                lines.extend(_extract_context_lines(fc))
+            # Also include primary (best match) prominently
+            primary = ctx.get("primary", {})
+            if primary:
+                lines.insert(1, "\n[BEST MATCH for this question]")
+                lines[2:2] = _extract_context_lines(primary)
+            lines.append("\n=== END OF FILE DATA ===\n")
+            return "\n".join(lines) + "\n"
+
+        # Single file format
+        lines = ["=== UPLOADED FILE DATA (use for follow-up questions) ==="]
+        lines.extend(_extract_context_lines(ctx))
         lines.append("=== END OF FILE DATA ===\n")
         return "\n".join(lines) + "\n"
     except Exception:
         return ""
+
+
+def _extract_context_lines(ctx: dict) -> list:
+    """Extract readable lines from a vision_result dict."""
+    lines = []
+    for field in ["patient_name","age","gender","report_date","lab_name","doctor_name",
+                   "scan_provider","scan_date","drug_name","manufacturer","expiry",
+                   "brand_name","company","batch_number","mrp"]:
+        val = ctx.get(field, "")
+        if val and str(val).strip() not in ("null","None",""):
+            lines.append(f"{field.replace('_',' ').title()}: {val}")
+    if ctx.get("summary"):
+        lines.append(f"Summary: {ctx['summary']}")
+    if ctx.get("tests"):
+        lines.append("Test Results:")
+        for t in ctx["tests"][:30]:
+            name = t.get("name",""); val = t.get("value","")
+            unit = t.get("unit",""); flag = t.get("flag","")
+            if name and val:
+                lines.append(f"  {name}: {val} {unit} {flag}".strip())
+    for field in ["uses","dosage","side_effects","warnings","findings"]:
+        val = ctx.get(field)
+        if val:
+            if isinstance(val, list):
+                lines.append(f"{field.title()}: {', '.join(str(v) for v in val[:5])}")
+            else:
+                lines.append(f"{field.title()}: {str(val)[:200]}")
+    return lines
 
 
 from typing import Optional
