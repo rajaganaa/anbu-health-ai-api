@@ -26,8 +26,13 @@ def _stub_heavy_modules():
         "groq", "qdrant_client", "qdrant_client.models", "sentence_transformers",
         "chromadb", "fitz", "pdfplumber", "wandb",
         "prometheus_fastapi_instrumentator", "prometheus_client",
-        "firebase_admin", "redis", "openai",
+        "firebase_admin", "redis", "openai", "requests",
     ]
+    # Stub requests so web_search.py lazy import doesn't fail in CI
+    import types as _types
+    _req_stub = _types.ModuleType("requests")
+    _req_stub.get = lambda *a, **kw: type("R", (), {"json": lambda self: {}, "status_code": 200})()
+    sys.modules["requests"] = _req_stub
     for name in stub_names:
         if name not in sys.modules:
             sys.modules[name] = types.ModuleType(name)
