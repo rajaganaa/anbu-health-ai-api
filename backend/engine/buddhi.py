@@ -209,18 +209,7 @@ Return ONLY valid JSON:
 }}"""
 
 _GENERAL_SYSTEM = f"""You are Anbu Health AI for Tamil Nadu village patients.
-Give helpful, accurate, SPECIFIC medical information like a knowledgeable doctor friend.
-
-CRITICAL RULES:
-- Give REAL specific answers — manufacturer names, dosage numbers, medical facts
-- If asked "what is the manufacturing company of Paracetamol PARACIP-500" → answer "Cipla Ltd"
-- If asked about dosage → give the actual dose (e.g. "500mg to 1000mg up to 4 times daily")
-- If asked general health questions → give real medical facts, not just "consult doctor"
-- NEVER say "the box will say" or "ask your doctor" for simple factual questions
-- Only say "consult doctor" for diagnosis, prescription, or personalized treatment decisions
-- Do NOT add irrelevant drugs (e.g. don't mention Ibuprofen when asked about Paracetamol)
-- If a file context is provided, answer STRICTLY from that data
-- Be as helpful and specific as ChatGPT / Claude — village patients deserve real answers
+Give helpful, accurate medical information. Simple language. Never diagnose from symptoms alone.
 
 {_LANGUAGE_RULES}
 
@@ -229,12 +218,12 @@ Return ONLY valid JSON:
   "mode": "general",
   "urgency": "low|medium|high",
   "confidence": 80,
-  "summary": "Direct specific answer — name the actual drug/test/finding",
-  "key_points": ["specific point 1 with real facts", "specific point 2", "specific point 3"],
-  "details": ["specific detail 1", "specific detail 2", "specific detail 3"],
-  "recommendation": "What patient should do next",
+  "summary": "Direct answer",
+  "key_points": ["specific point 1", "specific point 2", "specific point 3"],
+  "details": ["specific point 1", "specific point 2", "specific point 3"],
+  "recommendation": "What patient should do",
   "disclaimer": "⚠️ இது educational மட்டும். Doctor கிட்ட போங்க.",
-  "answer": "3-4 sentence helpful answer with ACTUAL specific medical info in natural spoken Tamil"
+  "answer": "3-4 sentence helpful answer with actual medical info in natural spoken Tamil"
 }}"""
 
 SYSTEM_PROMPTS = {
@@ -287,51 +276,55 @@ def _fallback(mode: str) -> Dict:
         "answer":"Sorry, analysis fail ஆச்சு. மீண்டும் try பண்ணுங்க.",
     }
 
-# ── Vision Context Builder ─────────────────────────────────────────────────────
-def _build_vision_context(vision_info: Dict, mode: str) -> str:
-    """Convert vision output into detailed context for LLM.
-    Handles both single-file and multi-file vault formats.
+# ── Vision Context Builder ───────────────────────────────────────────────────
+
+def _unwrap_vault(vision_info: Dict) -> Dict:
+    """Safety-net: if vision_info is a {filename: {data}} vault dict that
+    somehow wasn't unwrapped by main.py, flatten it into a single merged dict.
+    A genuine vision result always has at least one of these keys at the top
+    level; a vault dict has filename strings as keys instead.
     """
+    _vision_keys = {
+        "tests", "findings", "drug_name", "brand_name", "summary", "mode",
+        "scan_type", "body_part", "lab_name", "patient_name", "error",
+        "raw_text", "model", "overall_status", "abnormal_count",
+    }
+    if not vision_info:
+        return vision_info
+    # If ANY top-level key is a known vision field, it's already flat
+    if any(k in _vision_keys for k in vision_info):
+        return vision_info
+    # Otherwise it looks like a vault: values are dicts (the actual vision data)
+    entries = [v for v in vision_info.values() if isinstance(v, dict) and not v.get("error")]
+    if not entries:
+        return vision_info
+    merged = dict(entries[0])
+    for entry in entries[1:]:
+        for lk in ("tests", "findings", "abnormalities"):
+            if entry.get(lk) and isinstance(merged.get(lk), list):
+                merged[lk] = merged[lk] + entry[lk]
+        for sk in (
+            "patient_name", "age", "gender", "lab_name", "doctor_name",
+            "report_date", "scan_date", "scan_provider", "drug_name",
+            "brand_name", "manufacturer", "expiry", "mfg_date",
+            "dosage_instructions", "summary", "overall_status",
+            "scan_type", "body_part", "impression",
+        ):
+            if not merged.get(sk) and entry.get(sk):
+                merged[sk] = entry[sk]
+    return merged
+
+
+def _build_vision_context(vision_info: Dict, mode: str) -> str:
+    """Convert vision output into detailed context for LLM."""
+    if not vision_info or vision_info.get("error"): return ""
+
+    # Safety-net: unwrap vault format if main.py didn't do it already
+    vision_info = _unwrap_vault(vision_info)
     if not vision_info or vision_info.get("error"): return ""
 
     lines = []
 
-    # ── Multi-file vault format ──────────────────────────────────────────────
-    all_files = vision_info.get("_all_files", [])
-    if all_files:
-        lines.append("=== ALL UPLOADED FILES IN THIS SESSION ===")
-        lines.append("CRITICAL: Use these EXACT values to answer questions about any uploaded file.\n")
-        for i, f_entry in enumerate(all_files, 1):
-            fname   = f_entry.get("file", f"File {i}")
-            fmode   = f_entry.get("mode", "unknown")
-            fc      = f_entry.get("context", {})
-            lines.append(f"--- FILE {i}: {fname} ({fmode}) ---")
-            # Extract all key metadata
-            for key in ["patient_name","age","gender","report_date","lab_name",
-                        "doctor_name","scan_provider","scan_date",
-                        "drug_name","brand_name","generic_name","strength",
-                        "manufacturer","mfg_date","expiry"]:
-                val = fc.get(key,"")
-                if val and val not in ("Not visible","Not detected",""):
-                    lines.append(f"  {key}: {val}")
-            if fc.get("summary"):
-                lines.append(f"  summary: {fc['summary']}")
-            # Lab tests
-            if fmode == "lab" and fc.get("tests"):
-                lines.append(f"  tests ({len(fc['tests'])} total):")
-                for t in fc["tests"][:10]:
-                    n,v,u,s = t.get("name",""),t.get("value",""),t.get("unit",""),t.get("status","")
-                    if n and v: lines.append(f"    {n}: {v} {u} [{s}]")
-                if fc.get("abnormal_count"):
-                    lines.append(f"  abnormal_count: {fc['abnormal_count']}")
-            # Scan findings
-            if fmode == "scan" and fc.get("findings"):
-                lines.append(f"  findings: {', '.join(str(f) for f in fc['findings'][:5])}")
-        lines.append("\n=== END OF UPLOADED FILES ===")
-        lines.append("Answer the question using ONLY the above file data. Reference the specific file by name.")
-        return "\n".join(lines) + "\n\n"
-
-    # ── Single file format ───────────────────────────────────────────────────
     if mode == "lab":
         # Pass actual test values to LLM
         tests = vision_info.get("tests", [])
@@ -366,22 +359,30 @@ def _build_vision_context(vision_info: Dict, mode: str) -> str:
 
     elif mode == "scan":
         lines.append("=== SCAN/X-RAY ANALYSIS ===")
-        for k in ("scan_type","body_part","impression"):
-            v = vision_info.get(k,"")
+        for k in ("scan_type", "body_part", "impression"):
+            v = vision_info.get(k, "")
             if v: lines.append(f"  {k}: {v}")
-        findings = vision_info.get("findings",[])
+        findings = vision_info.get("findings", [])
         if findings: lines.append(f"  Findings: {', '.join(str(f) for f in findings)}")
-        abnorm = vision_info.get("abnormalities",[])
+        abnorm = vision_info.get("abnormalities", [])
         if abnorm: lines.append(f"  Abnormalities: {', '.join(str(a) for a in abnorm)}")
+        # Also surface summary + raw_text if no structured findings were extracted
+        summary = vision_info.get("summary", "")
+        if summary: lines.append(f"  Summary: {summary}")
+        raw_text = vision_info.get("raw_text", "")
+        if raw_text and not findings:
+            lines.append("=== RAW SCAN REPORT TEXT (parse carefully) ===")
+            lines.append(raw_text[:3000])
         # Patient / scan header — pass through verbatim, LLM should copy not invent
-        header = [(k, vision_info.get(k,"")) for k in
-                  ("patient_name","age","gender","scan_date","scan_provider","doctor_name")]
-        header = [(k,v) for k,v in header if v]
+        header = [(k, vision_info.get(k, "")) for k in
+                  ("patient_name", "age", "gender", "scan_date", "scan_provider", "doctor_name")]
+        header = [(k, v) for k, v in header if v]
         if header:
             lines.append("=== SCAN HEADER (copy these EXACTLY into the matching output fields) ===")
-            for k,v in header:
+            for k, v in header:
                 lines.append(f"  {k}: {v}")
         lines.append("TASK: Explain what these findings mean for the patient. If hardware visible, mention post-surgical status. Write a SPECIFIC summary (name the actual body part/finding) and 3-5 specific key_points — no generic filler.")
+
 
     elif mode == "medicine":
         lines.append("=== MEDICINE IDENTIFIED ===")
@@ -434,50 +435,12 @@ class Buddhi:
         system = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["general"])
 
         vision_ctx = _build_vision_context(vision_info or {}, mode)
-
-        # ── PRIORITY LOGIC ────────────────────────────────────────────────────
-        # 1. If we have actual file data (vision_ctx) → use ONLY that, suppress RAG.
-        #    RAG contaminates answers by injecting unrelated drug/lab info.
-        # 2. If no file data and it's a general question → go direct to LLM,
-        #    no RAG (acts like ChatGPT — answers from training knowledge).
-        # 3. Only use RAG when there's no file AND the question needs references.
-
-        if vision_ctx:
-            # File was uploaded this turn — answer STRICTLY from extracted file data
-            rag_ctx = ""  # suppress RAG entirely
-            context_block = (
-                f"{vision_ctx}"
-                f"\n⚠️ CRITICAL INSTRUCTION: Answer ONLY from the file data above. "
-                f"Do NOT use any external knowledge about other drugs, other patients, "
-                f"or general medical references. If the answer is not in the file data, say so.\n\n"
-            )
-        elif context_str and context_str.strip() and not context_str.startswith("Previous conversation:"):
-            # Follow-up with stored file_context injected via _build_file_context_str
-            # The file context is already in context_str — use it directly
-            rag_ctx = ""
-            context_block = (
-                f"=== REFERENCE DATA ===\n{context_str}\n=== END ===\n\n"
-                f"⚠️ Answer from the reference data above. For factual details "
-                f"(patient name, lab name, manufacturer, dosage on pack) use ONLY the data provided.\n\n"
-            )
-        else:
-            # No file — pure general question → answer from LLM knowledge directly
-            # (like ChatGPT — no RAG hallucination)
-            rag_ctx = ""
-            context_block = (
-                "Answer this general medical question using your medical knowledge. "
-                "Be specific and helpful. Do NOT say 'I don't know' for common medical questions. "
-                "Give the actual medical facts.\n\n"
-            )
-
-        lang_note = (
-            "\nIMPORTANT: Follow the LANGUAGE RULES — natural spoken Tamil, English medical terms."
-            if lang == "ta" else
-            "\nAnswer in English. Be specific and factual."
-        )
+        rag_ctx    = f"Medical Reference:\n{context_str}\n\n" if context_str.strip() else ""
+        lang_note  = "\nIMPORTANT: Follow the LANGUAGE RULES — natural spoken Tamil, English medical terms." if lang == "ta" else "\nFollow the LANGUAGE RULES — natural spoken Tamil, English medical terms."
 
         user_prompt = (
-            f"{context_block}"
+            f"{vision_ctx}"
+            f"{rag_ctx}"
             f"Patient question: {question}"
             f"{lang_note}\n\n"
             f"Return valid JSON only. No text before or after the JSON."
