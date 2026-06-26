@@ -330,7 +330,55 @@ async def user_status(phone: str):
 
 @app.get("/api/user/history")
 async def user_history(phone: str, limit: int = 50):
-    return {"phone": phone, "messages": db.get_history(phone, limit=limit)}
+    return {
+        "phone": phone,
+        "messages": db.get_history(phone, limit=limit),
+        "document_vaults": db.get_all_document_vaults(phone),
+    }
+
+
+@app.post("/api/chat/clear-context")
+@limiter.limit("20/minute")
+async def clear_context(
+    request: Request,
+    phone: str = Form(...),
+    chat_id: str = Form(default="default"),
+    file_key: Optional[str] = Form(default=None),
+):
+    return {"success": db.clear_document_vault(phone, chat_id, file_key)}
+
+
+def _merge_vault_entries(keyed_entries) -> dict:
+    seen = {}
+    for key, value in keyed_entries:
+        if not isinstance(value, dict) or value.get("error"):
+            continue
+        stable_key = key or str(len(seen))
+        if stable_key not in seen:
+            seen[stable_key] = value
+
+    entries = list(seen.values())
+    if not entries:
+        return {}
+    if len(entries) == 1:
+        return dict(entries[0])
+
+    merged = dict(entries[0])
+    for entry in entries[1:]:
+        for list_key in ("tests", "findings", "abnormalities"):
+            if entry.get(list_key):
+                existing = merged.get(list_key, [])
+                merged[list_key] = existing + entry[list_key] if isinstance(existing, list) else entry[list_key]
+        for scalar_key in (
+            "patient_name", "age", "gender", "lab_name", "doctor_name",
+            "report_date", "scan_date", "scan_provider", "drug_name",
+            "brand_name", "manufacturer", "expiry", "mfg_date",
+            "dosage_instructions", "summary", "overall_status",
+            "scan_type", "body_part", "impression",
+        ):
+            if not merged.get(scalar_key) and entry.get(scalar_key):
+                merged[scalar_key] = entry[scalar_key]
+    return merged
 
 # ── COMPLIANCE: Consent recording (DPDP Act 2023, Section 6) ──────────────────
 @app.post("/api/consent")
@@ -421,6 +469,7 @@ async def analyze(
     chat_id: Optional[str] = Form(default=None),
     chat_history: Optional[str] = Form(default=None),
     file_context: Optional[str] = Form(default=None),  # JSON vault from frontend
+    file_key: Optional[str] = Form(default=None),
 ):
     req_id = str(uuid.uuid4())[:8]
     t_start = time.time()
@@ -444,6 +493,7 @@ async def analyze(
     # ── Vision ────────────────────────────────────────────────────────────────
     vision_result = None
     image_path = None
+    persisted_file_key = None
 
     if image and image.filename:
         try:
@@ -470,9 +520,45 @@ async def analyze(
                 except Exception as te:
                     logger.warning(f"[{req_id}] Tools failed: {te}")
 
+            if phone and vision_result and not vision_result.get("error"):
+                persisted_file_key = file_key or f"{req_id}_{image.filename}"
+                db.save_document(
+                    phone=phone,
+                    chat_id=chat_id,
+                    file_key=persisted_file_key,
+                    mode=mode,
+                    vision_data=vision_result,
+                    file_name=image.filename,
+                )
+
         except Exception as e:
             logger.warning(f"[{req_id}] Vision failed: {e}")
             vision_result = {"error": str(e)}
+
+    if not vision_result:
+        keyed_entries = []
+        if phone:
+            for row in db.get_document_vault(phone, chat_id):
+                vision_data = dict(row.get("vision_data") or {})
+                if vision_data:
+                    vision_data.setdefault("mode", row.get("mode"))
+                    keyed_entries.append((row.get("file_key"), vision_data))
+        if file_context:
+            try:
+                client_vault = json.loads(file_context)
+                if isinstance(client_vault, dict):
+                    keyed_entries.extend(client_vault.items())
+            except Exception as e:
+                logger.warning(f"[{req_id}] file_context parse error: {e}")
+
+        effective_vision = _merge_vault_entries(keyed_entries)
+        if effective_vision:
+            vault_mode = effective_vision.get("mode", "")
+            if vault_mode in ("lab", "scan", "medicine") and mode == "general":
+                mode = vault_mode
+                logger.info(f"[{req_id}] Mode elevated from vault: {mode}")
+            vision_result = effective_vision
+            logger.info(f"[{req_id}] Document vault injected ({len(keyed_entries)} source(s))")
 
     # ── File Vault: inject stored vision data for follow-up questions ──────────
     # When the user asks a follow-up (no new image upload) the frontend sends
@@ -617,6 +703,7 @@ async def analyze(
         "question":              question,
         "total_latency_s":       latency,
         "vision":                vision_result,
+        "file_key":              persisted_file_key,
         "manas":                 manas_r,
         "chitta": {
             "num_chunks":        chitta_r["num_chunks"],
