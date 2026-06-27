@@ -348,6 +348,35 @@ async def clear_context(
     return {"success": db.clear_document_vault(phone, chat_id, file_key)}
 
 
+# ── Relevance scoring for multi-document follow-ups ─────────────────────────
+# Without this, _merge_vault_entries defaults to "first entry wins" for
+# scalar fields/mode — and since server rows are listed most-recent-first,
+# that silently means "whichever document was uploaded last wins",
+# regardless of what the question is actually about. Observed in production:
+# asking about a medicine right after uploading an unrelated X-ray got
+# answered using the X-ray, purely because it was the newest upload in the
+# chat. This scores each candidate document against the question text so the
+# most RELEVANT one wins instead.
+_LAB_KEYWORDS      = ("lab", "report", "result", "blood", "sugar", "glucose", "hba1c", "test")
+_SCAN_KEYWORDS     = ("scan", "mri", "xray", "x-ray", "bone", "brain", "elbow", "fracture", "scan center", "scan centre")
+_MEDICINE_KEYWORDS = ("medicine", "tablet", "drug", "dose", "dosage", "batch", "manufactur", "expiry", "மருந்து", "மாத்திரை")
+
+def _score_vault_entry(question: str, vd: dict) -> int:
+    q = question.lower()
+    score = 0
+    entry_mode = (vd.get("mode") or "").lower()
+    if entry_mode == "lab" and any(k in q for k in _LAB_KEYWORDS): score += 10
+    if entry_mode == "scan" and any(k in q for k in _SCAN_KEYWORDS): score += 10
+    if entry_mode == "medicine" and any(k in q for k in _MEDICINE_KEYWORDS): score += 10
+    for field in ("patient_name", "lab_name", "drug_name", "scan_provider", "doctor_name"):
+        v = (vd.get(field) or "").strip().lower()
+        if v:
+            first_word = v.split(" ")[0]
+            if len(first_word) >= 3 and first_word in q:
+                score += 15
+    return score
+
+
 def _merge_vault_entries(keyed_entries) -> dict:
     seen = {}
     for key, value in keyed_entries:
@@ -551,6 +580,14 @@ async def analyze(
             except Exception as e:
                 logger.warning(f"[{req_id}] file_context parse error: {e}")
 
+        if keyed_entries:
+            # Stable sort: ties keep their original order (server-recency first)
+            # as a sane default when nothing distinguishes two documents, but
+            # an actual keyword/name match always wins.
+            keyed_entries.sort(
+                key=lambda kv: _score_vault_entry(question, kv[1] or {}),
+                reverse=True
+            )
         effective_vision = _merge_vault_entries(keyed_entries)
         if effective_vision:
             vault_mode = effective_vision.get("mode", "")
@@ -559,62 +596,6 @@ async def analyze(
                 logger.info(f"[{req_id}] Mode elevated from vault: {mode}")
             vision_result = effective_vision
             logger.info(f"[{req_id}] Document vault injected ({len(keyed_entries)} source(s))")
-
-    # ── File Vault: inject stored vision data for follow-up questions ──────────
-    # When the user asks a follow-up (no new image upload) the frontend sends
-    # the entire fileVault as `file_context` JSON so Groq can answer from the
-    # ACTUAL extracted data instead of hallucinating.
-    if not vision_result and file_context:
-        try:
-            vault = json.loads(file_context)  # {"filename": {vision_dict}, ...}
-            if isinstance(vault, dict):
-                # Collect all non-error vault entries
-                valid_entries = [
-                    v for v in vault.values()
-                    if isinstance(v, dict) and not v.get("error")
-                ]
-                if valid_entries:
-                    if len(valid_entries) == 1:
-                        # Single file — use as-is
-                        effective_vision = valid_entries[0]
-                    else:
-                        # Multiple files — merge: combine tests/findings lists,
-                        # keep scalars from the first valid entry as defaults.
-                        effective_vision = dict(valid_entries[0])  # copy first
-                        for entry in valid_entries[1:]:
-                            # Merge list fields
-                            for list_key in ("tests", "findings", "abnormalities"):
-                                if entry.get(list_key):
-                                    existing = effective_vision.get(list_key, [])
-                                    if isinstance(existing, list):
-                                        effective_vision[list_key] = existing + entry[list_key]
-                                    else:
-                                        effective_vision[list_key] = entry[list_key]
-                            # Merge scalar fields: fill in any that are empty in first entry
-                            for scalar_key in (
-                                "patient_name", "age", "gender", "lab_name", "doctor_name",
-                                "report_date", "scan_date", "scan_provider", "drug_name",
-                                "brand_name", "manufacturer", "expiry", "mfg_date",
-                                "dosage_instructions", "summary", "overall_status",
-                                "scan_type", "body_part", "impression",
-                            ):
-                                if not effective_vision.get(scalar_key) and entry.get(scalar_key):
-                                    effective_vision[scalar_key] = entry[scalar_key]
-
-                    # Determine mode from vault if not already set by a fresh upload
-                    vault_mode = effective_vision.get("mode", "")
-                    if vault_mode and vault_mode in ("lab", "scan", "medicine") and mode == "general":
-                        mode = vault_mode
-                        logger.info(f"[{req_id}] Mode elevated from vault: {mode}")
-
-                    vision_result = effective_vision
-                    logger.info(
-                        f"[{req_id}] Vault injected ({len(valid_entries)} file(s)): "
-                        f"lab_name={effective_vision.get('lab_name','?')} "
-                        f"patient={effective_vision.get('patient_name','?')}"
-                    )
-        except Exception as e:
-            logger.warning(f"[{req_id}] file_context parse error: {e}")
 
     # ── Manas → Chitta → Buddhi → Ahamkara → Sakshi ──────────────────────────
     manas_r    = p["manas"].route(question, mode)
