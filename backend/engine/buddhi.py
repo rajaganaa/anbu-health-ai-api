@@ -101,6 +101,16 @@ _LANGUAGE_RULES = """LANGUAGE RULES:
 - Example bad: 'வலி நிவாரண மருந்து தலை வலி நீக்கும்'
 - Disclaimer must say: இது educational மட்டும். Doctor கிட்ட போங்க."""
 
+# Without this, the model defaults to re-explaining the WHOLE report/scan/
+# medicine every turn (because the TASK instructions below are about
+# explaining the document), even when the patient asked one narrow
+# question ("what is the lab name?"). Shared across all modes so a narrow
+# question gets a narrow, grounded answer regardless of mode.
+_ANSWER_GROUNDING = """ANSWERING RULES — apply these to the "answer" field above all else:
+- Read the "Patient question" given below FIRST. Your "answer" field's first sentence must directly answer THAT exact question — not a restatement of the whole report.
+- If the question asks for one specific fact (a name, date, place, value, etc.) and that fact is present anywhere in the data given to you, state that exact value as your first sentence. Do not pad it with the general report summary unless the patient actually asked for an overview.
+- If the question asks for a specific fact that is NOT present anywhere in the data given to you, say plainly that it wasn't found/extracted from the document. NEVER invent, guess, or assume a name, date, company, number, or any other fact that wasn't actually given to you above — this applies to the free-text "answer" field exactly as strictly as it applies to the structured fields."""
+
 _LAB_SYSTEM = f"""You are Anbu Health AI for Tamil Nadu village patients.
 You will receive ACTUAL LAB REPORT DATA extracted from the patient's report.
 Use ONLY the provided data — never invent values.
@@ -116,6 +126,8 @@ RULES:
 - key_points must give 3-5 short, concrete, plain-language points that each explain ONE real finding from this report — what it is, whether it's high/low/normal, and why it matters for the patient. No vague filler like "consult your doctor" without context — context comes first, the doctor advice is separate.
 
 {_LANGUAGE_RULES}
+
+{_ANSWER_GROUNDING}
 
 Return ONLY valid JSON (no text before/after):
 {{
@@ -150,6 +162,8 @@ CRITICAL RULES:
 - key_points must give 3-5 short, concrete, plain-language points that each explain ONE real finding from this scan — what it is and why it matters. No vague filler.
 
 {_LANGUAGE_RULES}
+
+{_ANSWER_GROUNDING}
 
 Return ONLY valid JSON:
 {{
@@ -187,6 +201,8 @@ RULES:
 
 {_LANGUAGE_RULES}
 
+{_ANSWER_GROUNDING}
+
 Return ONLY valid JSON:
 {{
   "mode": "medicine",
@@ -212,6 +228,8 @@ _GENERAL_SYSTEM = f"""You are Anbu Health AI for Tamil Nadu village patients.
 Give helpful, accurate medical information. Simple language. Never diagnose from symptoms alone.
 
 {_LANGUAGE_RULES}
+
+{_ANSWER_GROUNDING}
 
 Return ONLY valid JSON:
 {{
@@ -420,6 +438,187 @@ def _build_vision_context(vision_info: Dict, mode: str) -> str:
 
     return "\n".join(lines) + "\n\n" if lines else ""
 
+# ── Deterministic field lookup ──────────────────────────────────────────────
+# For a narrow question like "what is the lab name?", the most reliable
+# answer is a direct key lookup against the already-extracted data — not
+# another LLM generation that may (as observed in production) ignore the
+# specific question and re-explain the whole report instead.
+# Used as a fast-path BEFORE calling Groq; if no lookup phrase matches,
+# normal LLM reasoning proceeds unchanged.
+#
+# (phrase_to_match_lowercase, vision_info_key, display_label)
+_LOOKUP_FIELDS = {
+    "lab": [
+        ("patient name",    "patient_name", "Patient name"),
+        ("lab name",        "lab_name",     "Lab name"),
+        ("laboratory name", "lab_name",     "Lab name"),
+        ("diagnostic cent", "lab_name",     "Diagnostic centre"),
+        ("doctor name",     "doctor_name",  "Doctor name"),
+        ("report date",     "report_date",  "Report date"),
+        ("patient age",     "age",          "Age"),
+    ],
+    "scan": [
+        ("patient name",  "patient_name",   "Patient name"),
+        ("scan cent",     "scan_provider",  "Scan centre"),
+        ("imaging cent",  "scan_provider",  "Scan centre"),
+        ("hospital name", "scan_provider",  "Scan centre"),
+        ("scan date",     "scan_date",      "Scan date"),
+        ("doctor name",   "doctor_name",    "Doctor name"),
+        ("patient age",   "age",            "Age"),
+    ],
+    "medicine": [
+        ("manufacturer",        "manufacturer",   "Manufacturer"),
+        ("who makes",           "manufacturer",   "Manufacturer"),
+        ("made by",             "manufacturer",   "Manufacturer"),
+        ("which company",       "manufacturer",   "Manufacturer"),
+        ("batch number",        "batch_number",   "Batch number"),
+        ("batch no",            "batch_number",   "Batch number"),
+        ("manufacturing date",  "mfg_date",       "Manufacturing date"),
+        ("mfg date",            "mfg_date",       "Manufacturing date"),
+        ("expiry date",         "expiry",         "Expiry date"),
+        ("expiration date",     "expiry",         "Expiry date"),
+        ("medicine name",       "drug_name",      "Medicine name"),
+        ("drug name",           "drug_name",      "Medicine name"),
+    ],
+}
+# Tamil equivalents — merged in at lookup time
+_LOOKUP_FIELDS_TA = {
+    "lab": [
+        ("பேஷன்ட் பெயர்", "patient_name", "Patient name"),
+        ("நோயாளி பெயர்",   "patient_name", "Patient name"),
+        ("லேப் பெயர்",      "lab_name",     "Lab name"),
+        ("ஆய்வக",           "lab_name",     "Lab name"),
+        ("டாக்டர் பெயர்",   "doctor_name",  "Doctor name"),
+        ("அறிக்கை தேதி",    "report_date",  "Report date"),
+        ("வயது",             "age",          "Age"),
+    ],
+    "scan": [
+        ("பேஷன்ட் பெயர்",   "patient_name",  "Patient name"),
+        ("ஸ்கேன் மையம்",    "scan_provider", "Scan centre"),
+        ("ஸ்கேன் தேதி",     "scan_date",     "Scan date"),
+        ("டாக்டர் பெயர்",   "doctor_name",   "Doctor name"),
+    ],
+    "medicine": [
+        ("தயாரிப்பாளர்",    "manufacturer", "Manufacturer"),
+        ("எந்த நிறுவனம்",   "manufacturer", "Manufacturer"),
+        ("காலாவதி",          "expiry",       "Expiry date"),
+        ("மருந்தின் பெயர்", "drug_name",    "Medicine name"),
+    ],
+}
+
+
+def _try_direct_lookup(question: str, vision_info: Dict, mode: str) -> Optional[Dict]:
+    """Return a ready-made parsed-style dict if the question is a direct
+    field lookup this mode supports, else None (falls through to normal LLM
+    reasoning). If the phrase matches but the field wasn't actually
+    extracted, answers honestly that it wasn't found instead of letting
+    the model guess."""
+    if not vision_info or vision_info.get("error") or mode not in _LOOKUP_FIELDS:
+        return None
+    q = question.lower()
+    candidates = _LOOKUP_FIELDS.get(mode, []) + _LOOKUP_FIELDS_TA.get(mode, [])
+    for phrase, field_key, label in candidates:
+        if phrase.lower() in q:
+            value = (vision_info.get(field_key) or "").strip()
+            is_ta = bool(TAMIL_RE.search(question))
+            if value and value not in ("Not visible", "Not detected", "Unknown", ""):
+                answer = (f"{label}: {value}" if not is_ta
+                          else f"{label} — {value}.")
+            else:
+                answer = (f"{label} wasn't extracted from this document — "
+                          f"it may not be printed on it, or wasn't readable in the photo."
+                          if not is_ta else
+                          f"இந்த document-ல {label} extract ஆகவில்லை — "
+                          f"அது அதில் இல்லாமல் இருக்கலாம் அல்லது படத்தில் தெளிவாக இல்லாமல் இருக்கலாம்.")
+            logger.info(f"[BUDDHI] Direct lookup matched: phrase='{phrase}' field={field_key} found={bool(value)}")
+            return {
+                "mode": mode, "urgency": "low", "confidence": 95 if value else 60,
+                "summary": answer, "answer": answer,
+                "key_points": [], "findings": [], "details": [],
+                "recommendation": "Doctor கிட்ட confirm பண்ணுங்க.",
+                "disclaimer": "⚠️ இது educational மட்டும். Doctor கிட்ட போங்க.",
+                "patient_name": vision_info.get("patient_name", ""),
+                "age": vision_info.get("age", ""), "report_date": vision_info.get("report_date", ""),
+                "lab_name": vision_info.get("lab_name", ""), "doctor_name": vision_info.get("doctor_name", ""),
+                "scan_date": vision_info.get("scan_date", ""), "scan_provider": vision_info.get("scan_provider", ""),
+                "drug_name": vision_info.get("drug_name", ""),
+            }
+    return None
+
+
+def _assemble_result(parsed: Dict, mode: str, vi: Dict, lang: str, model_label: str, t0: float) -> Dict:
+    """Shared by both the direct-lookup fast-path and the normal LLM path —
+    builds the same structured_response shape either way, so the frontend
+    UI cards render identically regardless of which path answered."""
+    answer     = parsed.get("answer") or parsed.get("summary") or "மீண்டும் try பண்ணுங்க."
+    confidence = int(str(parsed.get("confidence", "70")).replace("%", "")) if parsed.get("confidence") else 70
+
+    def pick(*vals):
+        """First non-empty, non-placeholder value — prefers vision-extracted (OCR) data over the LLM echo."""
+        for v in vals:
+            if v and v not in ("Not visible", "Not detected"):
+                return v
+        return ""
+
+    sr = {
+        "summary":        parsed.get("summary", ""),
+        "full_answer":    answer,
+        "findings":       parsed.get("findings") or parsed.get("details") or [],
+        "key_points":     parsed.get("key_points") or [],
+        "recommendation": parsed.get("recommendation", ""),
+        "urgency":        parsed.get("urgency", "low"),
+        "confidence":     confidence,
+        "disclaimer":     parsed.get("disclaimer", "⚠️ Doctor confirm பண்ணுங்க."),
+    }
+    if mode == "medicine":
+        tool_results = vi.get("tool_results", {})
+        sr.update({
+            "uses":                parsed.get("uses", []),
+            "side_effects":        parsed.get("side_effects", []),
+            "warnings":            parsed.get("warnings", []),
+            "dosage":              pick(vi.get("dosage_instructions"), parsed.get("dosage")) or "Doctor prescription follow பண்ணுங்க",
+            "medicine_identified": parsed.get("medicine_identified", True),
+            "exp_date":            pick(vi.get("expiry"), parsed.get("exp_date")),
+            "mfg_date":            pick(vi.get("mfg_date"), parsed.get("mfg_date")),
+            "expiry_status":       tool_results.get("expiry") or {},
+        })
+    elif mode == "scan":
+        sr.update({
+            "body_part":         parsed.get("body_part", ""),
+            "scan_type":         parsed.get("scan_type", ""),
+            "implants_detected": parsed.get("implants_detected", False),
+            "implant_details":   parsed.get("implant_details", ""),
+            "fractures_visible": parsed.get("fractures_visible", False),
+            "patient_name":      pick(vi.get("patient_name"), parsed.get("patient_name")),
+            "age":               pick(vi.get("age"), parsed.get("age")),
+            "scan_date":         pick(vi.get("scan_date"), parsed.get("scan_date")),
+            "scan_provider":     pick(vi.get("scan_provider"), parsed.get("scan_provider")),
+            "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
+        })
+    elif mode == "lab":
+        sr.update({
+            "abnormal_findings": parsed.get("abnormal_findings", []),
+            "normal_findings":   parsed.get("normal_findings", []),
+            "patient_name":      pick(vi.get("patient_name"), parsed.get("patient_name")),
+            "age":               pick(vi.get("age"), parsed.get("age")),
+            "report_date":       pick(vi.get("report_date"), parsed.get("report_date")),
+            "lab_name":          pick(vi.get("lab_name"), parsed.get("lab_name")),
+            "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
+        })
+
+    return {
+        "draft_answer":        answer,
+        "pass1_answer":        answer,
+        "pass2_fired":         False,
+        "pass2_verified":      True,
+        "pass3_fired":         False,
+        "structured_response": sr,
+        "detected_language":   lang,
+        "model":               model_label,
+        "latency_s":           round(time.time() - t0, 3),
+    }
+
+
 # ── Buddhi Class ───────────────────────────────────────────────────────────────
 class Buddhi:
     def __init__(self): self._engine = None
@@ -433,6 +632,15 @@ class Buddhi:
         t0   = time.time()
         lang = detect_language(question)
         system = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["general"])
+
+        # Fast-path: a direct lookup of an already-extracted field beats an
+        # LLM regeneration that — as seen in production — sometimes ignores
+        # the specific question and re-explains the whole document instead.
+        # Skips the Groq call entirely when it matches: faster, free, and
+        # the answer is guaranteed to match what was actually extracted.
+        direct = _try_direct_lookup(question, vision_info or {}, mode)
+        if direct is not None:
+            return _assemble_result(direct, mode, vision_info or {}, lang, "direct_lookup", t0)
 
         vision_ctx = _build_vision_context(vision_info or {}, mode)
         rag_ctx    = f"Medical Reference:\n{context_str}\n\n" if context_str.strip() else ""
@@ -452,72 +660,5 @@ class Buddhi:
             logger.error(f"[BUDDHI] LLM failed: {e}")
             raw = ""
 
-        parsed     = _parse_json(raw, mode)
-        answer     = parsed.get("answer") or parsed.get("summary") or "மீண்டும் try பண்ணுங்க."
-        confidence = int(str(parsed.get("confidence","70")).replace("%","")) if parsed.get("confidence") else 70
-        vi         = vision_info or {}
-
-        def pick(*vals):
-            """First non-empty, non-placeholder value — prefers vision-extracted (OCR) data over the LLM echo."""
-            for v in vals:
-                if v and v not in ("Not visible", "Not detected"):
-                    return v
-            return ""
-
-        sr = {
-            "summary":        parsed.get("summary",""),
-            "full_answer":    answer,
-            "findings":       parsed.get("findings") or parsed.get("details") or [],
-            "key_points":     parsed.get("key_points") or [],
-            "recommendation": parsed.get("recommendation",""),
-            "urgency":        parsed.get("urgency","low"),
-            "confidence":     confidence,
-            "disclaimer":     parsed.get("disclaimer","⚠️ Doctor confirm பண்ணுங்க."),
-        }
-        if mode == "medicine":
-            tool_results = vi.get("tool_results", {})
-            sr.update({
-                "uses":                parsed.get("uses",[]),
-                "side_effects":        parsed.get("side_effects",[]),
-                "warnings":            parsed.get("warnings",[]),
-                "dosage":              pick(vi.get("dosage_instructions"), parsed.get("dosage")) or "Doctor prescription follow பண்ணுங்க",
-                "medicine_identified": parsed.get("medicine_identified", True),
-                "exp_date":            pick(vi.get("expiry"), parsed.get("exp_date")),
-                "mfg_date":            pick(vi.get("mfg_date"), parsed.get("mfg_date")),
-                "expiry_status":       tool_results.get("expiry") or {},
-            })
-        elif mode == "scan":
-            sr.update({
-                "body_part":         parsed.get("body_part",""),
-                "scan_type":         parsed.get("scan_type",""),
-                "implants_detected": parsed.get("implants_detected", False),
-                "implant_details":   parsed.get("implant_details",""),
-                "fractures_visible": parsed.get("fractures_visible", False),
-                "patient_name":      pick(vi.get("patient_name"), parsed.get("patient_name")),
-                "age":               pick(vi.get("age"), parsed.get("age")),
-                "scan_date":         pick(vi.get("scan_date"), parsed.get("scan_date")),
-                "scan_provider":     pick(vi.get("scan_provider"), parsed.get("scan_provider")),
-                "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
-            })
-        elif mode == "lab":
-            sr.update({
-                "abnormal_findings": parsed.get("abnormal_findings",[]),
-                "normal_findings":   parsed.get("normal_findings",[]),
-                "patient_name":      pick(vi.get("patient_name"), parsed.get("patient_name")),
-                "age":               pick(vi.get("age"), parsed.get("age")),
-                "report_date":       pick(vi.get("report_date"), parsed.get("report_date")),
-                "lab_name":          pick(vi.get("lab_name"), parsed.get("lab_name")),
-                "doctor_name":       pick(vi.get("doctor_name"), parsed.get("doctor_name")),
-            })
-
-        return {
-            "draft_answer":        answer,
-            "pass1_answer":        answer,
-            "pass2_fired":         False,
-            "pass2_verified":      True,
-            "pass3_fired":         False,
-            "structured_response": sr,
-            "detected_language":   lang,
-            "model":               GROQ_MODEL,
-            "latency_s":           round(time.time()-t0, 3),
-        }
+        parsed = _parse_json(raw, mode)
+        return _assemble_result(parsed, mode, vision_info or {}, lang, GROQ_MODEL, t0)
