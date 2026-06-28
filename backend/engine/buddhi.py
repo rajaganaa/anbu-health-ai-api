@@ -265,7 +265,7 @@ def _extract_regex(raw: str, mode: str) -> Dict:
     def gl(k):
         m=re.search(rf'"{k}"\s*:\s*\[([^\]]*)\]',raw,re.DOTALL)
         return re.findall(r'"([^"]+)"',m.group(1)) if m else []
-    ans = g("answer") or g("summary") or raw[:400]
+    ans = g("answer") or g("summary") or "Sorry, analysis fail ஆச்சு. மீண்டும் try பண்ணுங்க."
     return {
         "mode":mode,"urgency":g("urgency") or "low","confidence":65,
         "summary":g("summary") or ans,"findings":gl("findings"),"details":gl("details"),
@@ -513,6 +513,32 @@ def _try_direct_lookup(question: str, vision_info: Dict, mode: str) -> Optional[
     reasoning). If the phrase matches but the field wasn't actually
     extracted, answers honestly that it wasn't found instead of letting
     the model guess."""
+    # No document at all (mode is still "general" because nothing was ever
+    # uploaded) but the question is clearly asking about a document's field
+    # — answer honestly instead of sending an empty-context question to the
+    # LLM, which has nothing to work with and can produce garbled output.
+    if (not vision_info or vision_info.get("error")) and mode == "general":
+        q = question.lower()
+        all_candidates = (
+            _LOOKUP_FIELDS.get("lab", []) + _LOOKUP_FIELDS_TA.get("lab", []) +
+            _LOOKUP_FIELDS.get("scan", []) + _LOOKUP_FIELDS_TA.get("scan", []) +
+            _LOOKUP_FIELDS.get("medicine", []) + _LOOKUP_FIELDS_TA.get("medicine", [])
+        )
+        if any(phrase.lower() in q for phrase, _, _ in all_candidates):
+            is_ta = bool(TAMIL_RE.search(question))
+            answer = (
+                "எந்த document-உம் இன்னும் upload ஆகவில்லை. முதலில் lab report, scan அல்லது medicine photo-வை upload பண்ணுங்க, அப்புறம் இது மாதிரி கேள்வி கேளுங்க."
+                if is_ta else
+                "No document has been uploaded yet. Please upload a lab report, scan, or medicine photo first, then ask this question."
+            )
+            return {
+                "mode": "general", "urgency": "low", "confidence": 90,
+                "summary": answer, "answer": answer,
+                "key_points": [], "findings": [], "details": [],
+                "recommendation": "", "disclaimer": "⚠️ இது educational மட்டும். Doctor கிட்ட போங்க.",
+            }
+        return None
+
     if not vision_info or vision_info.get("error") or mode not in _LOOKUP_FIELDS:
         return None
     q = question.lower()
