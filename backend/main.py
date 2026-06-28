@@ -687,6 +687,7 @@ async def analyze(
             # embedding wins over recency; name-match bonus breaks ties.
             keyed_entries.sort(key=lambda kv: _score_vault_entry(question, kv[1] or {}), reverse=True)
         effective_vision = _merge_vault_entries(keyed_entries)
+        effective_vision.pop("_embedding", None)  # internal-only, never leaves the backend
         if effective_vision:
             vault_mode = effective_vision.get("mode", "")
             if vault_mode in ("lab", "scan", "medicine") and mode == "general":
