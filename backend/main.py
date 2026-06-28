@@ -262,6 +262,25 @@ async def ready():
         return JSONResponse(status_code=503, content={"ready": False, "reason": "pipeline still warming up"})
     return {"ready": True}
 
+# ── App/developer info for a Settings screen — never shown mid-chat ──────────
+@app.get("/api/about")
+async def about():
+    return {
+        "app_name":    "Anbu Health AI",
+        "version":     "2.1.0",
+        "description": "AI-powered health information assistant — helps you understand symptoms, lab reports, scans, and medicines in simple language. This is educational information only; it does not replace a doctor's diagnosis or decision.",
+        "languages":   ["Tamil", "English", "Tanglish"],
+        "developer": {
+            "name":        "Rajaganapathy M",
+            "affiliation": "SRM University",
+            "email":       "rajaganaa@gmail.com",
+            "phone":       "9176631419",
+        },
+        "patent":      "202641043947",
+        "compliance":  "Telemedicine Practice Guidelines 2020 + DPDP Act 2023",
+        "disclaimer":  "⚠️ This app provides general health information only. It does not diagnose conditions or prescribe treatment. Always consult a qualified doctor for medical decisions.",
+    }
+
 @app.get("/")
 async def root():
     return {"message": "Anbu Health AI API — /docs for Swagger, /health for status"}
@@ -349,32 +368,104 @@ async def clear_context(
 
 
 # ── Relevance scoring for multi-document follow-ups ─────────────────────────
-# Without this, _merge_vault_entries defaults to "first entry wins" for
-# scalar fields/mode — and since server rows are listed most-recent-first,
-# that silently means "whichever document was uploaded last wins",
-# regardless of what the question is actually about. Observed in production:
-# asking about a medicine right after uploading an unrelated X-ray got
-# answered using the X-ray, purely because it was the newest upload in the
-# chat. This scores each candidate document against the question text so the
-# most RELEVANT one wins instead.
+# Layer 1: Cosine similarity between the question embedding and each
+# document's stored embedding (computed once at upload time, reused here).
+# This beats the old keyword list because "hemoglobin", "creatinine", etc.
+# are semantically close to "lab report" in vector space without needing to
+# be enumerated — confirmed fix for the production bug where "range of
+# hemoglobin" scored 0 for every doc and fell back to "newest wins".
+#
+# Layer 2: Name-match tiebreaker — if the patient/lab/drug name from a
+# document appears in the question, add a high-precision bonus on top of
+# the semantic score. Cheap and reliable; kept from the previous version.
+#
+# Fallback: if a vault entry has no stored embedding (uploaded before this
+# change, or offline), falls back to keyword scoring so nothing breaks.
 _LAB_KEYWORDS      = ("lab", "report", "result", "blood", "sugar", "glucose", "hba1c", "test")
 _SCAN_KEYWORDS     = ("scan", "mri", "xray", "x-ray", "bone", "brain", "elbow", "fracture", "scan center", "scan centre")
 _MEDICINE_KEYWORDS = ("medicine", "tablet", "drug", "dose", "dosage", "batch", "manufactur", "expiry", "மருந்து", "மாத்திரை")
 
-def _score_vault_entry(question: str, vd: dict) -> int:
+def _cosine(a: list, b: list) -> float:
+    """Pure-Python cosine similarity — avoids a numpy import at module level."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na  = sum(x * x for x in a) ** 0.5
+    nb  = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+# Cache the question embedding within a single request's scoring pass so we
+# don't re-encode the same question once per vault entry.
+_question_embedding_cache: dict = {}
+
+def _embed_text(text: str) -> list:
+    """Encode text using chitta's already-loaded SentenceTransformer."""
+    from engine.chitta import _get_embedding_model
+    return _get_embedding_model().encode(text).tolist()
+
+def _score_vault_entry(question: str, vd: dict) -> float:
     q = question.lower()
-    score = 0
-    entry_mode = (vd.get("mode") or "").lower()
-    if entry_mode == "lab" and any(k in q for k in _LAB_KEYWORDS): score += 10
-    if entry_mode == "scan" and any(k in q for k in _SCAN_KEYWORDS): score += 10
-    if entry_mode == "medicine" and any(k in q for k in _MEDICINE_KEYWORDS): score += 10
+
+    # ── Layer 1: semantic similarity via stored embedding ──────────────────
+    doc_emb = vd.get("_embedding")
+    if doc_emb and isinstance(doc_emb, list):
+        # Cache the question embedding so we encode it only once per sort pass
+        if question not in _question_embedding_cache:
+            try:
+                _question_embedding_cache[question] = _embed_text(question)
+            except Exception:
+                _question_embedding_cache[question] = None
+        q_emb = _question_embedding_cache.get(question)
+        if q_emb:
+            score = _cosine(q_emb, doc_emb)  # 0.0 – 1.0
+        else:
+            score = 0.0
+    else:
+        # ── Fallback: keyword scoring for entries without a stored embedding ──
+        score = 0.0
+        entry_mode = (vd.get("mode") or "").lower()
+        if entry_mode == "lab"      and any(k in q for k in _LAB_KEYWORDS):      score += 0.3
+        if entry_mode == "scan"     and any(k in q for k in _SCAN_KEYWORDS):     score += 0.3
+        if entry_mode == "medicine" and any(k in q for k in _MEDICINE_KEYWORDS): score += 0.3
+
+    # ── Layer 2: name-match tiebreaker (high-precision, cheap) ────────────
     for field in ("patient_name", "lab_name", "drug_name", "scan_provider", "doctor_name"):
         v = (vd.get(field) or "").strip().lower()
         if v:
             first_word = v.split(" ")[0]
             if len(first_word) >= 3 and first_word in q:
-                score += 15
+                score += 0.5  # strong boost; a name match almost always wins
+                break         # one match is enough — don't stack multiple
+
     return score
+
+
+def _build_doc_embedding(vision_data: dict, mode: str) -> list:
+    """Build and return a document embedding from its key extracted fields.
+    Called once at upload time; stored alongside vision_data so follow-up
+    questions can score against it without re-encoding at query time.
+    Returns [] on any failure so the caller can proceed without an embedding."""
+    try:
+        parts = [f"{mode} report"]
+        summary = (vision_data.get("summary") or "")[:200]
+        if summary:
+            parts.append(summary)
+        for field in ("lab_name", "drug_name", "scan_provider", "patient_name",
+                      "doctor_name", "overall_status", "impression"):
+            v = (vision_data.get(field) or "").strip()
+            if v and v not in ("Not visible", "Not detected", "Unknown"):
+                parts.append(v)
+        # Include key test names so "hemoglobin" scores high against a lab doc
+        for test in (vision_data.get("tests") or [])[:8]:
+            name = (test.get("name") or test.get("test_name") or "").strip()
+            if name:
+                parts.append(name)
+        for finding in (vision_data.get("findings") or [])[:5]:
+            if isinstance(finding, str) and finding.strip():
+                parts.append(finding.strip())
+        text = ". ".join(parts)
+        return _embed_text(text)
+    except Exception as e:
+        logger.warning(f"[VAULT] Embedding failed (non-fatal): {e}")
+        return []
 
 
 def _merge_vault_entries(keyed_entries) -> dict:
@@ -551,12 +642,20 @@ async def analyze(
 
             if phone and vision_result and not vision_result.get("error"):
                 persisted_file_key = file_key or f"{req_id}_{image.filename}"
+                # Embed once at upload time — stored in vision_data so
+                # _score_vault_entry can use it for all future follow-ups
+                # without re-encoding. Non-fatal: if embedding fails the
+                # document still saves, just falls back to keyword scoring.
+                vision_to_save = dict(vision_result)
+                emb = _build_doc_embedding(vision_result, mode)
+                if emb:
+                    vision_to_save["_embedding"] = emb
                 db.save_document(
                     phone=phone,
                     chat_id=chat_id,
                     file_key=persisted_file_key,
                     mode=mode,
-                    vision_data=vision_result,
+                    vision_data=vision_to_save,
                     file_name=image.filename,
                 )
 
@@ -581,13 +680,12 @@ async def analyze(
                 logger.warning(f"[{req_id}] file_context parse error: {e}")
 
         if keyed_entries:
-            # Stable sort: ties keep their original order (server-recency first)
-            # as a sane default when nothing distinguishes two documents, but
-            # an actual keyword/name match always wins.
-            keyed_entries.sort(
-                key=lambda kv: _score_vault_entry(question, kv[1] or {}),
-                reverse=True
-            )
+            # Clear per-request embedding cache before scoring so stale
+            # entries from a previous request don't leak across calls.
+            _question_embedding_cache.clear()
+            # Semantic sort: cosine similarity against each document's stored
+            # embedding wins over recency; name-match bonus breaks ties.
+            keyed_entries.sort(key=lambda kv: _score_vault_entry(question, kv[1] or {}), reverse=True)
         effective_vision = _merge_vault_entries(keyed_entries)
         if effective_vision:
             vault_mode = effective_vision.get("mode", "")
@@ -710,6 +808,7 @@ async def analyze(
         "final_answer":          compliant_answer,
         "compliance_disclaimer": compliance_r["compliance_disclaimer"],
         "emergency_alert":       compliance_r.get("emergency_alert"),   # None or string
+        "clinic_referral":       buddhi_r.get("clinic_referral"),       # None, or real clinic contact info when urgency is medium/high
         "sources":               chitta_r["sources"],
         "confidence":            ahamkara_r.get("confidence_score", 0),
         "prompts":               prompts_status,
